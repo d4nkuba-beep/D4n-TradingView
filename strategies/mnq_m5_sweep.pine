@@ -16,7 +16,8 @@
 //  7. ORB module (backtest/orb_backtest.py): first close beyond the 09:30-09:35 range, stop at the
 //     range midpoint, same exits and trend filter. First signal of the day wins, one position at a time.
 strategy("MNQ NY-Open Sweep + ORB", shorttitle = "MNQ Sweep+ORB", overlay = true,
-     initial_capital = 10000, default_qty_type = strategy.fixed, default_qty_value = 2,
+     initial_capital = 25000, default_qty_type = strategy.fixed, default_qty_value = 2,
+     margin_long = 0, margin_short = 0,   // no margin check: with the v6 default (100 %) 2 MNQ need ~$120k and every order is rejected
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.62,
      slippage = 1, process_orders_on_close = true, calc_on_every_tick = false,
      max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
@@ -365,6 +366,9 @@ if justClosed
 
 // arming and confirmation only when flat, no order working, inside the window
 bool enteredNow = false
+var int dbgSweeps = 0
+var int dbgOrb = 0
+var int dbgOrders = 0
 canSetup = flat and not pending and not justClosed and inWindow
 if not canSetup
     armSide := 0
@@ -385,6 +389,7 @@ else
     if newSide != 0
         armSide := newSide
         armBar := bar_index
+        dbgSweeps += 1
         alert("MNQ sweep of " + armName + (newSide < 0 ? " (short setup)" : " (long setup)"), alert.freq_once_per_bar_close)
 
     if armSide != 0
@@ -425,6 +430,7 @@ else
                         pendBar := bar_index
                     npAtEntry := strategy.netprofit
                     enteredNow := true
+                    dbgOrders += 1
                     placeExits()
                     alert("MNQ " + (s > 0 ? "LONG" : "SHORT") + " entry " + str.tostring(entry) + " SL " + str.tostring(sl) +
                          " TP1 " + str.tostring(tTp1) + " TP2 " + str.tostring(tTp2), alert.freq_once_per_bar_close)
@@ -447,6 +453,7 @@ else if iUseOrb and not orbDone and not na(orHi) and todMin >= orEnd and tod <= 
     int so = close > orHi ? 1 : close < orLo ? -1 : 0
     if so != 0
         orbDone := true   // the first breakout decides the day
+        dbgOrb += 1
         freeNow = strategy.position_size == 0 and na(pendBar) and not enteredNow and not justClosed and inWindow
         if freeNow and trendOk(so)
             float slO = (orHi + orLo) / 2 - so * 2 * tick
@@ -458,6 +465,7 @@ else if iUseOrb and not orbDone and not na(orHi) and todMin >= orEnd and tod <= 
                 tTp1 := close + so * iTp1R * riskO
                 tTp2 := close + so * iTp2R * riskO
                 strategy.entry("Sweep", so > 0 ? strategy.long : strategy.short, comment = "ORB")
+                dbgOrders += 1
                 npAtEntry := strategy.netprofit
                 placeExits()
                 alert("MNQ ORB " + (so > 0 ? "LONG" : "SHORT") + " entry " + str.tostring(close) + " SL " + str.tostring(slO) +
@@ -523,3 +531,18 @@ plot(iTrend == "EMA 20/50" ? ema20 : na, "EMA 20", color.new(color.orange, 20))
 plot(iTrend == "EMA 20/50" ? ema50 : na, "EMA 50", color.new(color.purple, 20))
 plot(iTrend == "Price vs VWAP" and tod >= 930 and tod < 1600 ? vwapV : na, "VWAP", color.new(color.blue, 20), style = plot.style_linebr)
 bgcolor(tod >= iStart and tod <= iLastEntry ? color.new(color.blue, 94) : na, title = "Entry window")
+
+// ───────── Debug: are signals firing and orders being sent? ─────────
+iShowDbg = input.bool(true, "Show debug table", group = grpV)
+var table dbg = table.new(position.top_right, 2, 5, bgcolor = color.new(color.gray, 85), border_width = 1)
+if iShowDbg and barstate.islast
+    table.cell(dbg, 0, 0, "Sweeps detected", text_size = size.small)
+    table.cell(dbg, 1, 0, str.tostring(dbgSweeps), text_size = size.small)
+    table.cell(dbg, 0, 1, "ORB breakouts", text_size = size.small)
+    table.cell(dbg, 1, 1, str.tostring(dbgOrb), text_size = size.small)
+    table.cell(dbg, 0, 2, "Orders sent", text_size = size.small)
+    table.cell(dbg, 1, 2, str.tostring(dbgOrders), text_size = size.small)
+    table.cell(dbg, 0, 3, "Trades filled", text_size = size.small)
+    table.cell(dbg, 1, 3, str.tostring(strategy.closedtrades + strategy.opentrades), text_size = size.small)
+    table.cell(dbg, 0, 4, "Chart TF / tick", text_size = size.small)
+    table.cell(dbg, 1, 4, timeframe.period + " / " + str.tostring(syminfo.mintick), text_size = size.small)
