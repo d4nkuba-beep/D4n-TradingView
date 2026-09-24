@@ -1,4 +1,4 @@
-# MNQ NY-Open Liquidity Sweep (M5)
+# MNQ NY-Open Sweep + ORB (M5)
 
 Regelbasierte Umsetzung der Chart-Beispiele (NAS100 / MNQ rund um die New-York-Eröffnung)
 als TradingView-Strategie plus lokaler Python-Backtest.
@@ -6,7 +6,9 @@ als TradingView-Strategie plus lokaler Python-Backtest.
 | Datei | Inhalt |
 |---|---|
 | `strategies/mnq_m5_sweep.pine` | Pine v6 `strategy()` für TradingView (MNQ1!, 5 Minuten) |
-| `backtest/sweep_backtest.py` | Python-Nachbau derselben Regeln, Bar für Bar, ohne Lookahead |
+| `backtest/sweep_backtest.py` | Python-Nachbau der Sweep-Regeln, Bar für Bar, ohne Lookahead |
+| `backtest/orb_backtest.py` | Opening-Range-Breakout-Modul |
+| `backtest/combined_backtest.py` | Beide Setups zusammen, so wie das Pine-Script handelt |
 | `backtest/data/mnq_{5m,15m,1h}.csv` | MNQ-Kerzen (Yahoo `MNQ=F`, stichprobenartig gegen TradingView `CME_MINI:MNQ1!` geprüft: identisch) |
 
 ## Die Regeln
@@ -27,19 +29,56 @@ der Preis dreht, Ziel ist die Gegenseite, Stop über/unter dem Docht, danach „
 
 Kosten im Test: 0,62 $ Kommission pro Kontrakt und Seite plus 1 Tick Slippage. 2 Kontrakte MNQ (2 $/Punkt).
 
-## Ergebnisse (ehrlich)
+## Version 2: Trendfilter + ORB-Modul
 
-Daten: 17.07.–24.09.2026, 48 Handelstage (mehr als 60 Tage 5-Minuten-Historie gibt es kostenlos nicht).
+Getestete Ergänzungen (je mit identischen Kosten und Fill-Regeln):
+
+| Filter / Idee | Ergebnis |
+|---|---|
+| VWAP (mit Trend) | kein Mehrwert im späten Testteil |
+| VWAP (Rückkehr zum VWAP) | schlechter |
+| EMA50 auf H1 (mit Trend) | leicht besser, späte Hälfte ~0 |
+| **EMA20 > EMA50 auf M5 (mit Trend)** | **besser in beiden Hälften, bei beiden Setups** |
+| Gegen den EMA-Trend (Kontrollgruppe) | Verlust, bestätigt den Filter |
+| Opening Range Breakout 15/30 Min. | kein Vorteil |
+| **ORB 5 Min. (erste Kerze), Stop Mitte der Range, EMA-Filter** | **PF 1,85, 3 von 4 Zeitabschnitten positiv** |
+
+Neue Standardregeln (Pine und Python):
+
+7. **Richtungsfilter**: Long nur bei EMA20 > EMA50 (M5), Short nur darunter.
+8. **Sweep-Stop-Grenze**: max. 5 × ATR(14) statt fester 150 Punkte.
+9. **ORB-Modul**: Range = 09:30–09:35-Kerze. Erste Schlusskerze außerhalb entscheidet den Tag.
+   Einstieg nur mit Trendfilter, Stop 2 Ticks hinter der Range-Mitte, gleiche Ausstiege (TP1 1R 50 % + BE, TP2 2R, 11:30 flat).
+10. Sweep und ORB zusammen: erstes Signal gewinnt, immer nur eine Position, max. 2 Trades pro Tag.
+
+```
+python backtest/combined_backtest.py --trades   # so wie das Pine-Script handelt
+python backtest/sweep_backtest.py --tf 5m        # nur Sweep
+python backtest/orb_backtest.py [--grid]         # nur ORB
+```
+
+**Kombiniert (M5, 2 MNQ, 17.07.–24.09.2026)**
+
+| Satz | Trades | Trefferquote | PF | Ø R | Netto | Max. DD |
+|---|---|---|---|---|---|---|
+| In-Sample | 20 | 70,0 % | 2,39 | +0,36 | +2.962 $ | 996 $ |
+| Out-of-Sample | 15 | 60,0 % | 1,21 | +0,17 | +335 $ | 591 $ |
+| Gesamt | 35 | 65,7 % | 1,88 | +0,28 | +3.297 $ | 996 $ |
+
+Netto je Viertel des Zeitraums: +1.260 / +1.482 / −484 / +849 $. Bootstrap P(Ø R > 0) = 0,94.
+
+**Einordnung**
+
+- Besser als Version 1, und der EMA-Filter wirkt plausibel: Gegen-den-Trend-Trades verlieren.
+- **Trotzdem kein Beweis**: 35 Trades in 48 Tagen, und die Regeln wurden nach ca. 300 getesteten Varianten
+  ausgewählt. Das Ergebnis ist deshalb vermutlich zu optimistisch (Auswahleffekt). Der späte Testteil ist nur leicht positiv.
+- Der entscheidende nächste Schritt ist der **TradingView Strategy Tester mit Deep Backtesting über mehrere Jahre**
+  (M5-Historie von MNQ1!), danach Demokonto. Erst wenn es dort über 200+ Trades hält, ist es eine Strategie.
+
+## Version 1: Ergebnisse ohne Filter
+
+Version 1 (nur Sweep, ohne Trendfilter, max. 150 Punkte Stop).
 Die ersten 60 % der Tage dienten der Entwicklung (In-Sample), die letzten 40 % wurden erst am Ende getestet (Out-of-Sample).
-
-```
-python backtest/sweep_backtest.py --tf 5m            # Standardwerte
-python backtest/sweep_backtest.py --tf 5m --trades   # plus Trade-Liste
-python backtest/sweep_backtest.py --tf 15m
-python backtest/sweep_backtest.py --tf 5m --grid     # 96 Varianten
-```
-
-**M5, Standardwerte**
 
 | Satz | Trades | Trefferquote | Profit-Faktor | Ø R | Netto | Max. Drawdown |
 |---|---|---|---|---|---|---|
@@ -47,23 +86,13 @@ python backtest/sweep_backtest.py --tf 5m --grid     # 96 Varianten
 | Out-of-Sample | 12 | 58,3 % | 0,98 | −0,08 | −35 $ | 908 $ |
 | Gesamt | 25 | 56,0 % | 1,20 | +0,05 | +709 $ | 908 $ |
 
-**M15**: nur 6 Trades in 48 Tagen (−53 $), statistisch wertlos. Kein Vorteil gegenüber M5.
+Reproduzieren: `python backtest/sweep_backtest.py --tf 5m --trend none --risk-atr 0`.
+M15 hatte nur 6 Trades in 48 Tagen und war statistisch wertlos. Das Ergebnis hing an einzelnen Trades
+(mit max. 100 Punkten Stop: −2.221 $). Echte Scalps mit engem Stop funktionieren auf MNQ zur NY-Eröffnung nicht:
+Die Stops liegen im Median bei ~90 Punkten (~180 $ pro Kontrakt).
 
-**Einordnung**
-
-- Ein **stabiler Vorteil ist nicht nachweisbar.** Out-of-Sample ist das Ergebnis ungefähr null.
-- Das Ergebnis hängt an einzelnen Trades. Mit max. 100 statt 150 Punkten Stop wird es deutlich negativ
-  (−2.221 $, PF 0,41). Späterer Ausstieg (12:30 oder 15:45) oder TP2 bei 3R verschlechtert es ebenfalls.
-- Im 96-Varianten-Raster sind auf M5 nur 10 % der Varianten in beiden Hälften profitabel, auf M15 keine einzige.
-- Echte Scalps mit engem Stop funktionieren hier nicht: Die NY-Open-Kerzen auf MNQ (~30.000 Punkte)
-  brauchen Stops von median ~90 Punkten, also ~180 $ pro Kontrakt.
-- Die Screenshots zeigen ausgewählte Gewinner. Ein systematischer Test aller gleichartigen Setups sieht deutlich
-  nüchterner aus. Beispiel 11.09.2026 (Bild mit MNQ 1m, Short um 10:00): Die Regel steigt erst nach der
-  Bestätigung tiefer ein und wird ausgestoppt, während der diskretionäre Trade im Plus lag.
-
-**Nicht mit echtem Geld handeln**, bevor die Strategie im TradingView Strategy Tester über deutlich längere
-Historie (TradingView Premium: Deep Backtesting) und danach mehrere Wochen auf einem Demokonto positiv war.
-Keine Anlageberatung, keine Gewinngarantie.
+**Nicht mit echtem Geld handeln**, bevor die Strategie über mehrere Jahre im Strategy Tester und danach mehrere
+Wochen auf einem Demokonto positiv war. Keine Anlageberatung, keine Gewinngarantie.
 
 ## In TradingView laden
 
@@ -75,7 +104,7 @@ Keine Anlageberatung, keine Gewinngarantie.
    Das Script meldet jeden Sweep und jeden Einstieg mit Stop, TP1 und TP2.
 
 Alle Regeln sind über die Einstellungen änderbar (Zeiten, Levels, Bestätigung, FVG-Pflicht, OTE-Einstieg,
-Stop-Grenzen, TP-Größen, Breakeven). Das Pine-Script ist nicht lokal kompiliert. Falls TradingView einen
+Stop-Grenzen, TP-Größen, Breakeven, Trendfilter, ORB an/aus). Das Pine-Script ist nicht lokal kompiliert. Falls TradingView einen
 Fehler meldet, bitte die Meldung schicken. TradingViews Broker-Emulator füllt Orders innerhalb einer Kerze
 etwas anders als der konservative Python-Test (dort gilt: Stop und Ziel in derselben Kerze = Stop), daher
 weichen die Zahlen leicht ab.

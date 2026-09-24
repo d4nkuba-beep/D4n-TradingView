@@ -12,7 +12,10 @@
 //     Stop 2 ticks beyond the sweep extreme.
 //  5. Protection: TP1 at 1R closes 50 %, stop of the rest moves to breakeven,
 //     TP2 at 2R. Everything flat at 11:30 ET.
-strategy("MNQ NY-Open Liquidity Sweep", shorttitle = "MNQ Sweep", overlay = true,
+//  6. Trend filter (default): long only if EMA20 > EMA50 on the chart timeframe, short only below.
+//  7. ORB module (backtest/orb_backtest.py): first close beyond the 09:30-09:35 range, stop at the
+//     range midpoint, same exits and trend filter. First signal of the day wins, one position at a time.
+strategy("MNQ NY-Open Sweep + ORB", shorttitle = "MNQ Sweep+ORB", overlay = true,
      initial_capital = 10000, default_qty_type = strategy.fixed, default_qty_value = 2,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.62,
      slippage = 1, process_orders_on_close = true, calc_on_every_tick = false,
@@ -45,9 +48,17 @@ iEntryMode = input.string("Market", "Entry", options = ["Market", "OTE limit"], 
 iOte       = input.float(0.5, "OTE retracement", minval = 0.1, maxval = 0.95, step = 0.05, group = grpE)
 iPendBars  = input.int(6, "Limit order lifetime (bars)", minval = 1, group = grpE)
 
+grpT = "Trend filter"
+iTrend = input.string("EMA 20/50", "Direction filter", options = ["None", "EMA 20/50", "Price vs VWAP", "Price vs H1 EMA50"], group = grpT)
+
+grpO = "Opening range breakout"
+iUseOrb = input.bool(true, "Trade ORB", group = grpO)
+iOrbMin = input.int(5, "Opening range (minutes after 09:30)", minval = 1, group = grpO)
+
 grpR = "Risk & protection"
 iMinRisk = input.float(10.0,  "Min stop (points)", group = grpR)
 iMaxRisk = input.float(150.0, "Max stop (points) - skip if larger", group = grpR)
+iRiskAtr = input.float(5.0, "Sweep: max stop in ATR(14) (0 = use points)", minval = 0, step = 0.5, group = grpR)
 iTp1R    = input.float(1.0, "TP1 (R)", step = 0.25, group = grpR)
 iTp2R    = input.float(2.0, "TP2 (R)", step = 0.25, group = grpR)
 iTp1Pct  = input.int(50, "TP1 size (%)", minval = 1, maxval = 99, group = grpR)
@@ -60,6 +71,19 @@ todPrev = hhmm(time[1])
 // true on the first bar at/after hhmm x (also across midnight / weekend gaps)
 crossed(x) => tod >= x and (todPrev < x or tod < todPrev)
 tick = syminfo.mintick
+
+// ───────── Filters (all known at bar close) ─────────
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
+atr14  = ta.atr(14)
+vwapV  = ta.vwap(hlc3, crossed(930))
+emaH1  = request.security(syminfo.tickerid, "60", ta.ema(close, 50)[1], lookahead = barmerge.lookahead_on)
+trendOk(int s) =>
+    switch iTrend
+        "EMA 20/50"         => (ema20 - ema50) * s > 0
+        "Price vs VWAP"     => (close - vwapV) * s > 0
+        "Price vs H1 EMA50" => (close - emaH1) * s > 0
+        => true
 
 // ───────── Level store ─────────
 var float[]  lvPx   = array.new_float()
@@ -263,6 +287,7 @@ if justClosed
     npAtEntry := na
 
 // arming and confirmation only when flat, no order working, inside the window
+bool enteredNow = false
 canSetup = flat and not pending and not justClosed and inWindow
 if not canSetup
     armSide := 0
@@ -298,7 +323,7 @@ else
                 for off = 0 to bar_index - armBar - 1
                     if s < 0 ? high[off] < low[off + 2] : low[off] > high[off + 2]
                         hasFvg := true
-            if shifted and hasFvg
+            if shifted and hasFvg and trendOk(s)
                 float sl = s < 0 ? armExt + 2 * tick : armExt - 2 * tick
                 float entry = close
                 if iEntryMode == "OTE limit"
@@ -307,7 +332,7 @@ else
                         legEnd := s < 0 ? math.min(legEnd, low[off]) : math.max(legEnd, high[off])
                     entry := math.round_to_mintick(legEnd + (armExt - legEnd) * iOte)
                 float risk = math.abs(sl - entry)
-                if risk <= iMaxRisk
+                if risk <= (iRiskAtr > 0 ? iRiskAtr * atr14 : iMaxRisk)
                     if risk < iMinRisk
                         sl := entry - s * iMinRisk
                         risk := iMinRisk
@@ -321,10 +346,43 @@ else
                         strategy.entry("Sweep", s > 0 ? strategy.long : strategy.short, limit = entry, comment = armName)
                         pendBar := bar_index
                     npAtEntry := strategy.netprofit
+                    enteredNow := true
                     placeExits()
                     alert("MNQ " + (s > 0 ? "LONG" : "SHORT") + " entry " + str.tostring(entry) + " SL " + str.tostring(sl) +
                          " TP1 " + str.tostring(tTp1) + " TP2 " + str.tostring(tTp2), alert.freq_once_per_bar_close)
                 armSide := 0
+
+// ───────── Opening range breakout ─────────
+var float orHi = na
+var float orLo = na
+var bool  orbDone = false
+todMin = hour(time, TZ) * 60 + minute(time, TZ)
+orEnd  = 9 * 60 + 30 + iOrbMin
+if newDay
+    orHi := na
+    orLo := na
+    orbDone := false
+if todMin >= 570 and todMin < orEnd
+    orHi := na(orHi) ? high : math.max(orHi, high)
+    orLo := na(orLo) ? low  : math.min(orLo, low)
+else if iUseOrb and not orbDone and not na(orHi) and todMin >= orEnd and tod <= iLastEntry
+    int so = close > orHi ? 1 : close < orLo ? -1 : 0
+    if so != 0
+        orbDone := true   // the first breakout decides the day
+        freeNow = strategy.position_size == 0 and na(pendBar) and not enteredNow and not justClosed and inWindow
+        if freeNow and trendOk(so)
+            float slO = (orHi + orLo) / 2 - so * 2 * tick
+            float riskO = math.abs(close - slO)
+            if riskO > 0 and riskO <= iMaxRisk
+                tEntry := close
+                tStop := slO
+                tTp1 := close + so * iTp1R * riskO
+                tTp2 := close + so * iTp2R * riskO
+                strategy.entry("Sweep", so > 0 ? strategy.long : strategy.short, comment = "ORB")
+                npAtEntry := strategy.netprofit
+                placeExits()
+                alert("MNQ ORB " + (so > 0 ? "LONG" : "SHORT") + " entry " + str.tostring(close) + " SL " + str.tostring(slO) +
+                     " TP1 " + str.tostring(tTp1) + " TP2 " + str.tostring(tTp2), alert.freq_once_per_bar_close)
 
 // ───────── Visuals ─────────
 showTrade = not flat or pending
@@ -332,4 +390,7 @@ plot(showTrade ? tStop : na, "Stop", color.red,   2, plot.style_linebr)
 plot(showTrade ? tTp1  : na, "TP1",  color.lime,  1, plot.style_linebr)
 plot(showTrade ? tTp2  : na, "TP2",  color.green, 2, plot.style_linebr)
 plot(showTrade ? tEntry : na, "Entry", color.gray, 1, plot.style_linebr)
+plot(iTrend == "EMA 20/50" ? ema20 : na, "EMA 20", color.new(color.orange, 20))
+plot(iTrend == "EMA 20/50" ? ema50 : na, "EMA 50", color.new(color.purple, 20))
+plot(iTrend == "Price vs VWAP" and tod >= 930 and tod < 1600 ? vwapV : na, "VWAP", color.new(color.blue, 20), style = plot.style_linebr)
 bgcolor(tod >= iStart and tod <= iLastEntry ? color.new(color.blue, 94) : na, title = "Entry window")

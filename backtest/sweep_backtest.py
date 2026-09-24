@@ -48,6 +48,8 @@ class Params:
     confirm: int = 3  # bars after the sweep to get the structure shift
     struct_lb: int = 0  # bars before the sweep that define the structure (0 = sweep bar itself)
     need_fvg: bool = False
+    trend: str = "ema5_with"  # none | vwap_with | vwap_against | ema5_with | ema1h_with | ema1h_against
+    risk_atr: float = 5.0  # >0: max stop = risk_atr * ATR(14) instead of max_risk
     close_back: bool = False  # sweep bar must close back inside the level
     pending_bars: int = 6  # limit order lifetime
     min_risk: float = 10.0  # points
@@ -82,7 +84,50 @@ def load(tf: str) -> pd.DataFrame:
     df["dt"] = pd.to_datetime(df.t, unit="s", utc=True).dt.tz_convert("America/New_York")
     df["date"] = df.dt.dt.date
     df["tod"] = df.dt.dt.time
+    add_indicators(df, step)
     return df
+
+
+def add_indicators(df: pd.DataFrame, step: int) -> None:
+    """Filter inputs, all known at the close of each bar (no lookahead)."""
+    # session VWAP anchored at 09:30 ET (NaN before the open)
+    tp = (df.h + df.l + df.c) / 3
+    rth = df.tod >= time(9, 30)
+    key = df.date.astype(str)
+    pv = (tp * df.v).where(rth, 0.0).groupby(key).cumsum()
+    vv = df.v.where(rth, 0.0).groupby(key).cumsum()
+    df["vwap"] = (pv / vv.replace(0, np.nan)).where(rth)
+    df["ema20"] = df.c.ewm(span=20, adjust=False).mean()
+    df["ema50"] = df.c.ewm(span=50, adjust=False).mean()
+    tr = pd.concat([df.h - df.l, (df.h - df.c.shift()).abs(), (df.l - df.c.shift()).abs()], axis=1).max(axis=1)
+    df["atr"] = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    # 1h EMA50 of the last *completed* hour
+    hh = pd.read_csv(DATA / "mnq_1h.csv")
+    hh = hh[hh.t % 3600 == 0].sort_values("t")
+    hh["ema"] = hh.c.ewm(span=50, adjust=False).mean()
+    hh["avail"] = hh.t + 3600  # known once the hour has closed
+    bar_close = df.t + step
+    idx = np.searchsorted(hh.avail.to_numpy(), bar_close.to_numpy(), side="right") - 1
+    df["ema_h1"] = np.where(idx >= 0, hh.ema.to_numpy()[np.clip(idx, 0, None)], np.nan)
+
+
+def trend_ok(p: "Params", s: int, i: int, a: dict) -> bool:
+    """Direction filter evaluated on the confirmation bar close."""
+    c = a["c"][i]
+    f = p.trend
+    if f == "none":
+        return True
+    if f == "vwap_with":  # long only above VWAP, short only below
+        return (c - a["vwap"][i]) * s > 0
+    if f == "vwap_against":  # reversal back toward VWAP
+        return (c - a["vwap"][i]) * s < 0
+    if f == "ema5_with":
+        return (a["ema20"][i] - a["ema50"][i]) * s > 0
+    if f == "ema1h_with":
+        return (c - a["ema_h1"][i]) * s > 0
+    if f == "ema1h_against":
+        return (c - a["ema_h1"][i]) * s < 0
+    raise ValueError(f)
 
 
 def build_levels(df: pd.DataFrame) -> dict:
@@ -143,6 +188,7 @@ class Trade:
 def run(df: pd.DataFrame, p: Params, levels: dict) -> list[Trade]:
     o, h, l, c = (df[k].to_numpy() for k in "ohlc")
     tod = df.tod.to_numpy()
+    arr = {k: df[k].to_numpy() for k in ("c", "vwap", "ema20", "ema50", "ema_h1", "atr")}
     trades: list[Trade] = []
     for d, day_levels in levels.items():
         idx = np.flatnonzero((df.date == d).to_numpy())
@@ -277,6 +323,8 @@ def run(df: pd.DataFrame, p: Params, levels: dict) -> list[Trade]:
                 if not shifted:
                     continue
                 j0 = armed["bar"]
+                if not trend_ok(p, s, i, arr):
+                    continue
                 if p.need_fvg:
                     has = any((h[k] < l[k - 2]) if s < 0 else (l[k] > h[k - 2])
                               for k in range(j0 + 1, i + 1))
@@ -291,7 +339,7 @@ def run(df: pd.DataFrame, p: Params, levels: dict) -> list[Trade]:
                     entry = leg_end + (ext - leg_end) * p.ote
                     entry = round(entry / TICK) * TICK
                 risk = abs(stop - entry)
-                if risk > p.max_risk:
+                if risk > (p.risk_atr * arr["atr"][i] if p.risk_atr else p.max_risk):
                     armed = None
                     continue
                 if risk < p.min_risk:
@@ -336,6 +384,8 @@ def main():
     ap.add_argument("--fvg", action="store_true")
     ap.add_argument("--no-intraday", action="store_true")
     ap.add_argument("--max-risk", type=float)
+    ap.add_argument("--trend", default="ema5_with")
+    ap.add_argument("--risk-atr", type=float, default=5.0)
     ap.add_argument("--grid", action="store_true")
     ap.add_argument("--trades", action="store_true", help="print trade list")
     a = ap.parse_args()
@@ -363,7 +413,7 @@ def main():
         return
 
     p = Params.for_tf(a.tf, entry=a.entry, ote=a.ote, tp2_r=a.tp2, need_fvg=a.fvg,
-                      intraday_levels=not a.no_intraday,
+                      intraday_levels=not a.no_intraday, trend=a.trend, risk_atr=a.risk_atr,
                       **({"max_risk": a.max_risk} if a.max_risk else {}))
     tr = run(df, p, levels)
     ins, oos, cut = split(tr, dates)
