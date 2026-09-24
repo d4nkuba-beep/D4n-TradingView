@@ -19,7 +19,7 @@ strategy("MNQ NY-Open Sweep + ORB", shorttitle = "MNQ Sweep+ORB", overlay = true
      initial_capital = 10000, default_qty_type = strategy.fixed, default_qty_value = 2,
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.62,
      slippage = 1, process_orders_on_close = true, calc_on_every_tick = false,
-     max_lines_count = 500, max_labels_count = 500)
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ───────── Inputs ─────────
 const string TZ = "America/New_York"
@@ -37,7 +37,14 @@ iUseAsia   = input.bool(true, "Asia high/low",             group = grpL)
 iUseLondon = input.bool(true, "London high/low",           group = grpL)
 iUseSwing  = input.bool(true, "Intraday swings from 08:00", group = grpL)
 iPivot     = input.int(2, "Swing strength (bars each side)", minval = 1, group = grpL)
-iShowLv    = input.bool(true, "Draw levels", group = grpL)
+iShowLv    = input.bool(true, "Draw levels (solid end = broken, dotted end = expired)", group = grpL)
+iShowNames = input.bool(true, "Level names", group = grpL)
+
+grpV = "Display"
+iShowBoxes = input.bool(true, "Trade boxes (red = risk, green = target)", group = grpV)
+iShowZ15   = input.bool(true, "M15 support/resistance zones (display only)", group = grpV)
+iZ15Pivot  = input.int(3, "M15 zone swing strength", minval = 1, group = grpV)
+iZ15Max    = input.int(30, "Max active M15 zones", minval = 1, group = grpV)
 
 grpE = "Setup & entry"
 iConfirm   = input.int(3, "Bars to confirm after sweep", minval = 0, group = grpE)
@@ -91,19 +98,26 @@ var int[]    lvSide = array.new_int()     // +1 = high (sell-side sweep target),
 var string[] lvName = array.new_string()
 var line[]   lvLine = array.new_line()
 
-addLevel(float px, int side, string name) =>
+// a level is drawn from the bar where it formed until it is traded through (broken)
+// or until the trading day ends (expired, dotted)
+addLevel(float px, int side, string name, int x1) =>
     if not na(px)
         array.push(lvPx, px)
         array.push(lvSide, side)
         array.push(lvName, name)
-        array.push(lvLine, iShowLv ? line.new(bar_index, px, bar_index + 1, px, extend = extend.right,
-             color = side > 0 ? color.new(color.red, 30) : color.new(color.teal, 30), width = 1) : na)
+        col = side > 0 ? color.new(color.red, 30) : color.new(color.teal, 30)
+        array.push(lvLine, iShowLv ? line.new(x1, px, bar_index, px, extend = extend.right, color = col, width = 1) : na)
+        if iShowLv and iShowNames
+            label.new(x1, px, name, color = color(na), textcolor = col, size = size.tiny,
+                 style = side > 0 ? label.style_label_lower_left : label.style_label_upper_left)
 
-removeLevel(int k) =>
+removeLevel(int k, bool broken) =>
     ln = array.get(lvLine, k)
     if not na(ln)
         line.set_extend(ln, extend.none)
         line.set_x2(ln, bar_index)
+        if not broken
+            line.set_style(ln, line.style_dotted)
     array.remove(lvPx, k)
     array.remove(lvSide, k)
     array.remove(lvName, k)
@@ -111,7 +125,7 @@ removeLevel(int k) =>
 
 clearLevels() =>
     while array.size(lvPx) > 0
-        removeLevel(array.size(lvPx) - 1)
+        removeLevel(array.size(lvPx) - 1, false)
 
 // ───────── Session ranges ─────────
 var float rthHi = na
@@ -122,6 +136,14 @@ var float asHi = na
 var float asLo = na
 var float ldHi = na
 var float ldLo = na
+var int rthHiX = na
+var int rthLoX = na
+var int onHiX = na
+var int onLoX = na
+var int asHiX = na
+var int asLoX = na
+var int ldHiX = na
+var int ldLoX = na
 
 inRth    = tod >= 930 and tod < 1600
 inOn     = tod >= 1800 or tod < 930
@@ -132,26 +154,26 @@ inLondon = tod >= 200 and tod < 500
 if crossed(1600) and not na(rthHi)
     clearLevels()                     // new trading day: drop yesterday's levels
     if iUsePD
-        addLevel(rthHi, 1, "PDH")
-        addLevel(rthLo, -1, "PDL")
+        addLevel(rthHi, 1, "PDH", rthHiX)
+        addLevel(rthLo, -1, "PDL", rthLoX)
     rthHi := na
     rthLo := na
 if tod < 2000 and todPrev >= 2000 and not na(asHi)   // Asia ended at midnight
     if iUseAsia
-        addLevel(asHi, 1, "Asia H")
-        addLevel(asLo, -1, "Asia L")
+        addLevel(asHi, 1, "Asia H", asHiX)
+        addLevel(asLo, -1, "Asia L", asLoX)
     asHi := na
     asLo := na
 if crossed(500) and not na(ldHi)
     if iUseLondon
-        addLevel(ldHi, 1, "London H")
-        addLevel(ldLo, -1, "London L")
+        addLevel(ldHi, 1, "London H", ldHiX)
+        addLevel(ldLo, -1, "London L", ldLoX)
     ldHi := na
     ldLo := na
 if crossed(930) and not na(onHi)
     if iUseON
-        addLevel(onHi, 1, "ON H")
-        addLevel(onLo, -1, "ON L")
+        addLevel(onHi, 1, "ON H", onHiX)
+        addLevel(onLo, -1, "ON L", onLoX)
     onHi := na
     onLo := na
 
@@ -160,17 +182,33 @@ if crossed(1800)
     onHi := na
     onLo := na
 if inRth
-    rthHi := na(rthHi) ? high : math.max(rthHi, high)
-    rthLo := na(rthLo) ? low  : math.min(rthLo, low)
+    if na(rthHi) or high > rthHi
+        rthHi := high
+        rthHiX := bar_index
+    if na(rthLo) or low < rthLo
+        rthLo := low
+        rthLoX := bar_index
 if inOn
-    onHi := na(onHi) ? high : math.max(onHi, high)
-    onLo := na(onLo) ? low  : math.min(onLo, low)
+    if na(onHi) or high > onHi
+        onHi := high
+        onHiX := bar_index
+    if na(onLo) or low < onLo
+        onLo := low
+        onLoX := bar_index
 if inAsia
-    asHi := na(asHi) ? high : math.max(asHi, high)
-    asLo := na(asLo) ? low  : math.min(asLo, low)
+    if na(asHi) or high > asHi
+        asHi := high
+        asHiX := bar_index
+    if na(asLo) or low < asLo
+        asLo := low
+        asLoX := bar_index
 if inLondon
-    ldHi := na(ldHi) ? high : math.max(ldHi, high)
-    ldLo := na(ldLo) ? low  : math.min(ldLo, low)
+    if na(ldHi) or high > ldHi
+        ldHi := high
+        ldHiX := bar_index
+    if na(ldLo) or low < ldLo
+        ldLo := low
+        ldLoX := bar_index
 
 // ───────── Intraday swings (confirmed iPivot bars later) ─────────
 inSess = tod >= 800 and tod <= iFlat
@@ -188,9 +226,9 @@ if iUseSwing and inSess and bar_index > 2 * iPivot and hhmm(time[iPivot]) >= 800
             if k < iPivot ? low[k] <= pl : low[k] < pl
                 isL := false
     if isH
-        addLevel(ph, 1, "Swing H")
+        addLevel(ph, 1, "Swing H", bar_index - iPivot)
     if isL
-        addLevel(pl, -1, "Swing L")
+        addLevel(pl, -1, "Swing L", bar_index - iPivot)
 
 // ───────── Sweep detection: every level traded through is used up ─────────
 float sweptHiPx = na
@@ -205,12 +243,12 @@ if array.size(lvPx) > 0
             if na(sweptHiPx) or px > sweptHiPx
                 sweptHiPx := px
                 sweptHiName := array.get(lvName, k)
-            removeLevel(k)
+            removeLevel(k, true)
         else if sd < 0 and low < px - tick
             if na(sweptLoPx) or px < sweptLoPx
                 sweptLoPx := px
                 sweptLoName := array.get(lvName, k)
-            removeLevel(k)
+            removeLevel(k, true)
 
 // ───────── Day bookkeeping ─────────
 var int tradesToday = 0
@@ -240,6 +278,10 @@ var float tTp1 = na
 var float tTp2 = na
 var int   pendBar = na
 var bool  tp1Done = false
+var float slOrig = na
+var box   tbRisk = na
+var box   tbRew = na
+var line  tbTp1 = na
 
 flat    = strategy.position_size == 0
 pending = not na(pendBar)
@@ -282,6 +324,41 @@ if not flat and not tp1Done and math.abs(strategy.position_size) < math.abs(stra
     if iBe
         tStop := strategy.position_avg_price
         strategy.exit("TP2", "Sweep", limit = tTp2, stop = tStop, comment_profit = "TP2", comment_loss = "BE")
+
+// ───────── Trade boxes (like the long/short position tool) ─────────
+drawTrade(int eb, float ep) =>
+    b1 = box.new(eb, math.max(ep, slOrig), bar_index, math.min(ep, slOrig),
+         border_color = color.new(color.red, 50), bgcolor = color.new(color.red, 82))
+    b2 = box.new(eb, math.max(ep, tTp2), bar_index, math.min(ep, tTp2),
+         border_color = color.new(color.green, 50), bgcolor = color.new(color.green, 82))
+    l1 = line.new(eb, tTp1, bar_index, tTp1, color = color.new(color.green, 20), style = line.style_dashed)
+    [b1, b2, l1]
+
+if iShowBoxes
+    if not flat and strategy.position_size[1] == 0
+        [b1, b2, l1] = drawTrade(strategy.opentrades.entry_bar_index(0), strategy.opentrades.entry_price(0))
+        tbRisk := b1
+        tbRew := b2
+        tbTp1 := l1
+    if justClosed and na(tbRisk)    // opened and closed within the same bar
+        n = strategy.closedtrades - 1
+        [b1, b2, l1] = drawTrade(strategy.closedtrades.entry_bar_index(n), strategy.closedtrades.entry_price(n))
+        tbRisk := b1
+        tbRew := b2
+        tbTp1 := l1
+    if not na(tbRisk)
+        box.set_right(tbRisk, bar_index)
+        box.set_right(tbRew, bar_index)
+        line.set_x2(tbTp1, bar_index)
+    if justClosed and not na(tbRisk)
+        pnl = strategy.netprofit - npAtEntry
+        label.new(bar_index, pnl >= 0 ? high : low, (pnl >= 0 ? "+" : "") + str.tostring(pnl, "#") + " $",
+             yloc = pnl >= 0 ? yloc.abovebar : yloc.belowbar, color = color(na), size = size.small,
+             textcolor = pnl >= 0 ? color.green : color.red,
+             style = pnl >= 0 ? label.style_label_down : label.style_label_up)
+        tbRisk := na
+        tbRew := na
+        tbTp1 := na
 
 if justClosed
     npAtEntry := na
@@ -338,6 +415,7 @@ else
                         risk := iMinRisk
                     tEntry := entry
                     tStop := sl
+                    slOrig := sl
                     tTp1 := entry + s * iTp1R * risk
                     tTp2 := entry + s * iTp2R * risk
                     if iEntryMode == "Market"
@@ -376,6 +454,7 @@ else if iUseOrb and not orbDone and not na(orHi) and todMin >= orEnd and tod <= 
             if riskO > 0 and riskO <= iMaxRisk
                 tEntry := close
                 tStop := slO
+                slOrig := slO
                 tTp1 := close + so * iTp1R * riskO
                 tTp2 := close + so * iTp2R * riskO
                 strategy.entry("Sweep", so > 0 ? strategy.long : strategy.short, comment = "ORB")
@@ -383,6 +462,56 @@ else if iUseOrb and not orbDone and not na(orHi) and todMin >= orEnd and tod <= 
                 placeExits()
                 alert("MNQ ORB " + (so > 0 ? "LONG" : "SHORT") + " entry " + str.tostring(close) + " SL " + str.tostring(slO) +
                      " TP1 " + str.tostring(tTp1) + " TP2 " + str.tostring(tTp2), alert.freq_once_per_bar_close)
+
+// ───────── M15 support / resistance zones (display only, not used for entries) ─────────
+// Zone = wick area of a confirmed M15 swing: resistance from the candle body top to the high,
+// support from the low to the body bottom. Drawn from the swing candle until a M5 close breaks
+// through it (then the zone ends there) - a broken resistance is no longer shown as valid.
+[z15H, z15HBot, z15L, z15LTop, z15T] = request.security(syminfo.tickerid, "15",
+     [ta.pivothigh(high, iZ15Pivot, iZ15Pivot)[1], math.max(open, close)[iZ15Pivot + 1],
+      ta.pivotlow(low, iZ15Pivot, iZ15Pivot)[1], math.min(open, close)[iZ15Pivot + 1], time[iZ15Pivot + 1]],
+     lookahead = barmerge.lookahead_on)
+
+var box[]   zBox  = array.new_box()
+var float[] zTop  = array.new_float()
+var float[] zBot  = array.new_float()
+var int[]   zSide = array.new_int()
+var int     zLastT = na
+
+endZone(int k, bool broken) =>
+    b = array.get(zBox, k)
+    box.set_extend(b, extend.none)
+    box.set_right(b, time)
+    if not broken
+        box.set_border_style(b, line.style_dotted)
+    array.remove(zBox, k)
+    array.remove(zTop, k)
+    array.remove(zBot, k)
+    array.remove(zSide, k)
+
+newZone(float top, float bot, int side) =>
+    col = side > 0 ? color.red : color.teal
+    array.push(zBox, box.new(z15T, top, time, bot, xloc = xloc.bar_time, extend = extend.right,
+         border_color = color.new(col, 60), bgcolor = color.new(col, 88)))
+    array.push(zTop, top)
+    array.push(zBot, bot)
+    array.push(zSide, side)
+    if array.size(zBox) > iZ15Max
+        endZone(0, false)
+
+if iShowZ15
+    // invalidate: close above a resistance / below a support
+    if array.size(zBox) > 0
+        for k = array.size(zBox) - 1 to 0
+            sd = array.get(zSide, k)
+            if sd > 0 ? close > array.get(zTop, k) : close < array.get(zBot, k)
+                endZone(k, true)
+    if not na(z15T) and z15T != zLastT
+        zLastT := z15T
+        if not na(z15H) and close < z15H
+            newZone(z15H, math.min(z15HBot, z15H - tick), 1)
+        if not na(z15L) and close > z15L
+            newZone(math.max(z15LTop, z15L + tick), z15L, -1)
 
 // ───────── Visuals ─────────
 showTrade = not flat or pending

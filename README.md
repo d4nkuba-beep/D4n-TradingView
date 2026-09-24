@@ -9,6 +9,7 @@ als TradingView-Strategie plus lokaler Python-Backtest.
 | `backtest/sweep_backtest.py` | Python-Nachbau der Sweep-Regeln, Bar für Bar, ohne Lookahead |
 | `backtest/orb_backtest.py` | Opening-Range-Breakout-Modul |
 | `backtest/combined_backtest.py` | Beide Setups zusammen, so wie das Pine-Script handelt |
+| `backtest/plot_trades.py`, `backtest/charts/` | Chart-Vorschau aller Trade-Tage mit Levels, Zonen und Trade-Boxen |
 | `backtest/data/mnq_{5m,15m,1h}.csv` | MNQ-Kerzen (Yahoo `MNQ=F`, stichprobenartig gegen TradingView `CME_MINI:MNQ1!` geprüft: identisch) |
 
 ## Die Regeln
@@ -93,6 +94,31 @@ Die Stops liegen im Median bei ~90 Punkten (~180 $ pro Kontrakt).
 
 **Nicht mit echtem Geld handeln**, bevor die Strategie über mehrere Jahre im Strategy Tester und danach mehrere
 Wochen auf einem Demokonto positiv war. Keine Anlageberatung, keine Gewinngarantie.
+
+## Darstellung im Chart
+
+Das Pine-Script zeichnet auch rückwirkend für jeden Tag:
+
+- **Trade-Boxen** wie das Long/Short-Positions-Werkzeug: Rot = Risiko (Einstieg bis Stop), Grün = Ziel
+  (Einstieg bis TP2), gestrichelt = TP1. Am Ausstieg steht das Ergebnis in $.
+- **Liquiditäts-Levels** (PDH/PDL, Overnight, Asia, London, M5-Swing-Hochs/-Tiefs) mit Namen. Sie beginnen an der
+  Kerze, an der sie entstanden sind, und enden an der Kerze, die sie durchbricht (durchgezogenes Ende).
+  Ein Level, das bis Tagesende hält, endet gepunktet. Ein gebrochenes Level wird danach nicht mehr gezeigt und nicht mehr gehandelt.
+- **M15-Support/Resistance-Zonen**: Docht-Bereich eines bestätigten M15-Swings (3 Kerzen je Seite).
+  Die Zone gilt, bis eine M5-Kerze darüber (Resistance) bzw. darunter (Support) schließt, dann endet sie dort.
+  Nur zur Orientierung, die Einstiege nutzen die Zonen nicht.
+- EMA 20/50 bzw. VWAP je nach gewähltem Filter.
+
+Vorschau ohne TradingView: `python backtest/plot_trades.py` erzeugt für jeden Trade-Tag ein Bild in
+`backtest/charts/` nach denselben Regeln.
+
+## Wyckoff-Zonen (Begriff aus den Beispielbildern)
+
+Wyckoff beschreibt, wie große Marktteilnehmer in Seitwärtsphasen Positionen aufbauen (Akkumulation) oder
+abbauen (Distribution). Die Schlüsselstelle ist der **Spring** (bzw. **Upthrust** oben): Der Preis sticht kurz
+unter das Tief der Range, holt die Stops ab und kehrt sofort in die Range zurück. Das ist dasselbe Muster wie der
+Liquidity Sweep dieser Strategie. Eine „Wyckoff-Zone“ im Chart ist meist der Bereich um dieses Range-Tief/-Hoch,
+in dem auf den Spring und die Rückkehr gewartet wird.
 
 ## In TradingView laden
 
