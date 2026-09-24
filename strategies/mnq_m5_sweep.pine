@@ -1,0 +1,335 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+// MNQ NY-Open Liquidity Sweep (M5)
+// Rules (same as backtest/sweep_backtest.py):
+//  1. Levels: previous RTH day high/low, overnight (18:00-09:30) high/low,
+//     Asia (20:00-00:00) and London (02:00-05:00) high/low, plus confirmed
+//     swing highs/lows from 08:00 on. A level is used up once price trades through it.
+//  2. 09:30-11:00 ET: a bar trades through an untouched level  -> sweep.
+//  3. Within N bars a close back beyond the level and beyond the sweep bar's
+//     opposite extreme confirms the rejection (optional: FVG required).
+//  4. Entry market on the confirmation close (or limit at OTE retracement).
+//     Stop 2 ticks beyond the sweep extreme.
+//  5. Protection: TP1 at 1R closes 50 %, stop of the rest moves to breakeven,
+//     TP2 at 2R. Everything flat at 11:30 ET.
+strategy("MNQ NY-Open Liquidity Sweep", shorttitle = "MNQ Sweep", overlay = true,
+     initial_capital = 10000, default_qty_type = strategy.fixed, default_qty_value = 2,
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.62,
+     slippage = 1, process_orders_on_close = true, calc_on_every_tick = false,
+     max_lines_count = 500, max_labels_count = 500)
+
+// ───────── Inputs ─────────
+const string TZ = "America/New_York"
+grpS = "Session (New York time)"
+iStart     = input.int(930,  "First entry (hhmm)",   group = grpS)
+iLastEntry = input.int(1100, "Last entry (hhmm)",    group = grpS)
+iFlat      = input.int(1130, "Flat at (hhmm)",       group = grpS)
+iMaxTrades = input.int(2,    "Max trades per day",   minval = 1, group = grpS)
+iMaxLosses = input.int(2,    "Stop after N losses",  minval = 1, group = grpS)
+
+grpL = "Liquidity levels"
+iUsePD     = input.bool(true, "Previous day RTH high/low", group = grpL)
+iUseON     = input.bool(true, "Overnight high/low",        group = grpL)
+iUseAsia   = input.bool(true, "Asia high/low",             group = grpL)
+iUseLondon = input.bool(true, "London high/low",           group = grpL)
+iUseSwing  = input.bool(true, "Intraday swings from 08:00", group = grpL)
+iPivot     = input.int(2, "Swing strength (bars each side)", minval = 1, group = grpL)
+iShowLv    = input.bool(true, "Draw levels", group = grpL)
+
+grpE = "Setup & entry"
+iConfirm   = input.int(3, "Bars to confirm after sweep", minval = 0, group = grpE)
+iStructLb  = input.int(0, "Structure lookback (0 = sweep bar itself)", minval = 0, group = grpE)
+iCloseBack = input.bool(false, "Sweep bar must close back inside", group = grpE)
+iNeedFvg   = input.bool(false, "Require FVG in displacement", group = grpE)
+iEntryMode = input.string("Market", "Entry", options = ["Market", "OTE limit"], group = grpE)
+iOte       = input.float(0.5, "OTE retracement", minval = 0.1, maxval = 0.95, step = 0.05, group = grpE)
+iPendBars  = input.int(6, "Limit order lifetime (bars)", minval = 1, group = grpE)
+
+grpR = "Risk & protection"
+iMinRisk = input.float(10.0,  "Min stop (points)", group = grpR)
+iMaxRisk = input.float(150.0, "Max stop (points) - skip if larger", group = grpR)
+iTp1R    = input.float(1.0, "TP1 (R)", step = 0.25, group = grpR)
+iTp2R    = input.float(2.0, "TP2 (R)", step = 0.25, group = grpR)
+iTp1Pct  = input.int(50, "TP1 size (%)", minval = 1, maxval = 99, group = grpR)
+iBe      = input.bool(true, "Move stop to breakeven after TP1", group = grpR)
+
+// ───────── Time helpers ─────────
+hhmm(t) => hour(t, TZ) * 100 + minute(t, TZ)
+tod     = hhmm(time)
+todPrev = hhmm(time[1])
+// true on the first bar at/after hhmm x (also across midnight / weekend gaps)
+crossed(x) => tod >= x and (todPrev < x or tod < todPrev)
+tick = syminfo.mintick
+
+// ───────── Level store ─────────
+var float[]  lvPx   = array.new_float()
+var int[]    lvSide = array.new_int()     // +1 = high (sell-side sweep target), -1 = low
+var string[] lvName = array.new_string()
+var line[]   lvLine = array.new_line()
+
+addLevel(float px, int side, string name) =>
+    if not na(px)
+        array.push(lvPx, px)
+        array.push(lvSide, side)
+        array.push(lvName, name)
+        array.push(lvLine, iShowLv ? line.new(bar_index, px, bar_index + 1, px, extend = extend.right,
+             color = side > 0 ? color.new(color.red, 30) : color.new(color.teal, 30), width = 1) : na)
+
+removeLevel(int k) =>
+    ln = array.get(lvLine, k)
+    if not na(ln)
+        line.set_extend(ln, extend.none)
+        line.set_x2(ln, bar_index)
+    array.remove(lvPx, k)
+    array.remove(lvSide, k)
+    array.remove(lvName, k)
+    array.remove(lvLine, k)
+
+clearLevels() =>
+    while array.size(lvPx) > 0
+        removeLevel(array.size(lvPx) - 1)
+
+// ───────── Session ranges ─────────
+var float rthHi = na
+var float rthLo = na
+var float onHi = na
+var float onLo = na
+var float asHi = na
+var float asLo = na
+var float ldHi = na
+var float ldLo = na
+
+inRth    = tod >= 930 and tod < 1600
+inOn     = tod >= 1800 or tod < 930
+inAsia   = tod >= 2000
+inLondon = tod >= 200 and tod < 500
+
+// session ends -> publish levels (before any sweep check on this bar)
+if crossed(1600) and not na(rthHi)
+    clearLevels()                     // new trading day: drop yesterday's levels
+    if iUsePD
+        addLevel(rthHi, 1, "PDH")
+        addLevel(rthLo, -1, "PDL")
+    rthHi := na
+    rthLo := na
+if tod < 2000 and todPrev >= 2000 and not na(asHi)   // Asia ended at midnight
+    if iUseAsia
+        addLevel(asHi, 1, "Asia H")
+        addLevel(asLo, -1, "Asia L")
+    asHi := na
+    asLo := na
+if crossed(500) and not na(ldHi)
+    if iUseLondon
+        addLevel(ldHi, 1, "London H")
+        addLevel(ldLo, -1, "London L")
+    ldHi := na
+    ldLo := na
+if crossed(930) and not na(onHi)
+    if iUseON
+        addLevel(onHi, 1, "ON H")
+        addLevel(onLo, -1, "ON L")
+    onHi := na
+    onLo := na
+
+// accumulate ranges with the current bar
+if crossed(1800)
+    onHi := na
+    onLo := na
+if inRth
+    rthHi := na(rthHi) ? high : math.max(rthHi, high)
+    rthLo := na(rthLo) ? low  : math.min(rthLo, low)
+if inOn
+    onHi := na(onHi) ? high : math.max(onHi, high)
+    onLo := na(onLo) ? low  : math.min(onLo, low)
+if inAsia
+    asHi := na(asHi) ? high : math.max(asHi, high)
+    asLo := na(asLo) ? low  : math.min(asLo, low)
+if inLondon
+    ldHi := na(ldHi) ? high : math.max(ldHi, high)
+    ldLo := na(ldLo) ? low  : math.min(ldLo, low)
+
+// ───────── Intraday swings (confirmed iPivot bars later) ─────────
+inSess = tod >= 800 and tod <= iFlat
+if iUseSwing and inSess and bar_index > 2 * iPivot and hhmm(time[iPivot]) >= 800 and dayofmonth(time[iPivot], TZ) == dayofmonth(time, TZ)
+    ph = high[iPivot]
+    pl = low[iPivot]
+    isH = true
+    isL = true
+    for k = 0 to 2 * iPivot
+        if k != iPivot
+            // offsets < iPivot are the newer bars (right side): must be strictly lower/higher;
+            // older bars (left side) may be equal
+            if k < iPivot ? high[k] >= ph : high[k] > ph
+                isH := false
+            if k < iPivot ? low[k] <= pl : low[k] < pl
+                isL := false
+    if isH
+        addLevel(ph, 1, "Swing H")
+    if isL
+        addLevel(pl, -1, "Swing L")
+
+// ───────── Sweep detection: every level traded through is used up ─────────
+float sweptHiPx = na
+string sweptHiName = na
+float sweptLoPx = na
+string sweptLoName = na
+if array.size(lvPx) > 0
+    for k = array.size(lvPx) - 1 to 0
+        px = array.get(lvPx, k)
+        sd = array.get(lvSide, k)
+        if sd > 0 and high > px + tick
+            if na(sweptHiPx) or px > sweptHiPx
+                sweptHiPx := px
+                sweptHiName := array.get(lvName, k)
+            removeLevel(k)
+        else if sd < 0 and low < px - tick
+            if na(sweptLoPx) or px < sweptLoPx
+                sweptLoPx := px
+                sweptLoName := array.get(lvName, k)
+            removeLevel(k)
+
+// ───────── Day bookkeeping ─────────
+var int tradesToday = 0
+var int lossesToday = 0
+var float npAtEntry = na
+newDay = crossed(930)
+if newDay
+    tradesToday := 0
+    lossesToday := 0
+
+justClosed = strategy.closedtrades > strategy.closedtrades[1] and strategy.position_size == 0
+if justClosed
+    tradesToday += 1
+    if strategy.netprofit < npAtEntry
+        lossesToday += 1
+
+// ───────── Trade state ─────────
+var int   armSide = 0
+var float armExt = na
+var float armStruct = na
+var float armPx = na
+var int   armBar = na
+var string armName = ""
+var float tEntry = na
+var float tStop = na
+var float tTp1 = na
+var float tTp2 = na
+var int   pendBar = na
+var bool  tp1Done = false
+
+flat    = strategy.position_size == 0
+pending = not na(pendBar)
+inWindow = tod >= iStart and tod <= iLastEntry and tradesToday < iMaxTrades and lossesToday < iMaxLosses
+
+placeExits() =>
+    strategy.exit("TP1", "Sweep", qty_percent = iTp1Pct, limit = tTp1, stop = tStop, comment_profit = "TP1", comment_loss = "SL")
+    strategy.exit("TP2", "Sweep", limit = tTp2, stop = tStop, comment_profit = "TP2", comment_loss = "SL")
+
+// structure before the sweep (computed every bar so the ta.* history stays consistent)
+lowestN  = ta.lowest(low, math.max(iStructLb, 1))
+highestN = ta.highest(high, math.max(iStructLb, 1))
+structLo = iStructLb > 0 ? lowestN[1] : low
+structHi = iStructLb > 0 ? highestN[1] : high
+
+// flat at session end
+if tod >= iFlat and (not flat or pending)
+    strategy.close_all(comment = "Time")
+    if pending
+        strategy.cancel("Sweep")
+        pendBar := na
+        npAtEntry := na
+
+// pending limit order housekeeping
+if pending and flat and not justClosed
+    ranAway = tTp1 < tEntry ? low <= tTp1 : high >= tTp1
+    if bar_index - pendBar >= iPendBars or ranAway
+        strategy.cancel("Sweep")
+        pendBar := na
+        npAtEntry := na
+
+// position just opened
+if not flat and strategy.position_size[1] == 0
+    pendBar := na
+    tp1Done := false
+
+// after TP1: move the remaining stop to breakeven
+if not flat and not tp1Done and math.abs(strategy.position_size) < math.abs(strategy.position_size[1])
+    tp1Done := true
+    if iBe
+        tStop := strategy.position_avg_price
+        strategy.exit("TP2", "Sweep", limit = tTp2, stop = tStop, comment_profit = "TP2", comment_loss = "BE")
+
+if justClosed
+    npAtEntry := na
+
+// arming and confirmation only when flat, no order working, inside the window
+canSetup = flat and not pending and not justClosed and inWindow
+if not canSetup
+    armSide := 0
+else
+    int newSide = 0
+    if not na(sweptHiPx) and (not iCloseBack or close < sweptHiPx)
+        newSide := -1
+        armExt := high
+        armPx := sweptHiPx
+        armName := sweptHiName
+        armStruct := structLo
+    if not na(sweptLoPx) and (not iCloseBack or close > sweptLoPx)
+        newSide := 1
+        armExt := low
+        armPx := sweptLoPx
+        armName := sweptLoName
+        armStruct := structHi
+    if newSide != 0
+        armSide := newSide
+        armBar := bar_index
+        alert("MNQ sweep of " + armName + (newSide < 0 ? " (short setup)" : " (long setup)"), alert.freq_once_per_bar_close)
+
+    if armSide != 0
+        s = armSide
+        armExt := s < 0 ? math.max(armExt, high) : math.min(armExt, low)
+        if bar_index - armBar > iConfirm
+            armSide := 0
+        else
+            back = s < 0 ? math.min(armStruct, armPx) : math.max(armStruct, armPx)
+            shifted = s < 0 ? close < back : close > back
+            hasFvg = not iNeedFvg
+            if iNeedFvg and bar_index > armBar
+                for off = 0 to bar_index - armBar - 1
+                    if s < 0 ? high[off] < low[off + 2] : low[off] > high[off + 2]
+                        hasFvg := true
+            if shifted and hasFvg
+                float sl = s < 0 ? armExt + 2 * tick : armExt - 2 * tick
+                float entry = close
+                if iEntryMode == "OTE limit"
+                    float legEnd = s < 0 ? low : high
+                    for off = 0 to bar_index - armBar
+                        legEnd := s < 0 ? math.min(legEnd, low[off]) : math.max(legEnd, high[off])
+                    entry := math.round_to_mintick(legEnd + (armExt - legEnd) * iOte)
+                float risk = math.abs(sl - entry)
+                if risk <= iMaxRisk
+                    if risk < iMinRisk
+                        sl := entry - s * iMinRisk
+                        risk := iMinRisk
+                    tEntry := entry
+                    tStop := sl
+                    tTp1 := entry + s * iTp1R * risk
+                    tTp2 := entry + s * iTp2R * risk
+                    if iEntryMode == "Market"
+                        strategy.entry("Sweep", s > 0 ? strategy.long : strategy.short, comment = armName)
+                    else
+                        strategy.entry("Sweep", s > 0 ? strategy.long : strategy.short, limit = entry, comment = armName)
+                        pendBar := bar_index
+                    npAtEntry := strategy.netprofit
+                    placeExits()
+                    alert("MNQ " + (s > 0 ? "LONG" : "SHORT") + " entry " + str.tostring(entry) + " SL " + str.tostring(sl) +
+                         " TP1 " + str.tostring(tTp1) + " TP2 " + str.tostring(tTp2), alert.freq_once_per_bar_close)
+                armSide := 0
+
+// ───────── Visuals ─────────
+showTrade = not flat or pending
+plot(showTrade ? tStop : na, "Stop", color.red,   2, plot.style_linebr)
+plot(showTrade ? tTp1  : na, "TP1",  color.lime,  1, plot.style_linebr)
+plot(showTrade ? tTp2  : na, "TP2",  color.green, 2, plot.style_linebr)
+plot(showTrade ? tEntry : na, "Entry", color.gray, 1, plot.style_linebr)
+bgcolor(tod >= iStart and tod <= iLastEntry ? color.new(color.blue, 94) : na, title = "Entry window")
