@@ -1,0 +1,192 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+// MNQ Opening Drive (M5)  -  rules identical to backtest/lab (FirstCandle)
+//  1. Opening range = first 5 minutes of the cash session (09:30-09:35 New York).
+//  2. Displacement: the body of that candle (close - open) must be at least
+//     10 % of ATR_D (average 09:30-16:00 range of the previous 14 sessions).
+//  3. Trend filter: long only if EMA20 > EMA50 (chart timeframe, ETH data), short only below.
+//  4. Entry: market at 09:35 in the direction of the candle. One trade per day.
+//  5. Stop: 0.10 x ATR_D from the signal close. Target 10 R. Stop to breakeven after +2 R.
+//  6. Everything flat at 15:55. Size: fixed $ risk per trade -> number of MNQ.
+// Backtest 2023-01 .. 2026-09 (Nasdaq-100 M1, conservative fills): PF 2.37, see README.
+strategy("MNQ Opening Drive", shorttitle = "MNQ OD", overlay = true,
+     initial_capital = 50000, default_qty_type = strategy.fixed, default_qty_value = 1,
+     margin_long = 0, margin_short = 0,   // no margin check (v6 default 100 % would reject futures orders)
+     commission_type = strategy.commission.cash_per_contract, commission_value = 0.80,
+     slippage = 1, process_orders_on_close = false, calc_on_every_tick = false,
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ───────── Inputs ─────────
+const string TZ = "America/New_York"
+grpS = "Setup"
+iOrMin    = input.int(5, "Opening range (minutes from 09:30)", minval = 1, group = grpS,
+     tooltip = "5 on a 5-minute chart. On a 3-minute chart use 6 (first two candles).")
+iMinBody  = input.float(0.10, "Min. candle body (x ATR_D)", minval = 0, step = 0.01, group = grpS)
+iAtrDays  = input.int(14, "ATR_D sessions", minval = 2, group = grpS)
+iTrend    = input.string("EMA 20/50", "Trend filter", options = ["None", "EMA 20/50", "EMA 9/21", "EMA 200"], group = grpS)
+iRsiOn    = input.bool(false, "Extra filter: RSI(14) momentum", group = grpS,
+     tooltip = "Long only if RSI > 50 + x, short only if RSI < 50 - x. Tested: slightly higher PF, fewer trades.")
+iRsiX     = input.float(12, "RSI distance from 50", minval = 0, group = grpS)
+
+grpX = "Exits"
+iStopAtr  = input.float(0.10, "Stop (x ATR_D)", minval = 0.01, step = 0.01, group = grpX)
+iRR       = input.float(10.0, "Target (R)", minval = 0.5, step = 0.5, group = grpX)
+iBeAt     = input.float(2.0, "Stop to breakeven after (R, 0 = off)", minval = 0, step = 0.5, group = grpX)
+iFlat     = input.int(1555, "Flat at (hhmm New York)", group = grpX)
+
+grpR = "Risk (prop account)"
+iRiskUsd  = input.float(150, "Risk per trade ($)", minval = 10, group = grpR,
+     tooltip = "50k evaluation: 150 $ = 0.3 %. Sizes the number of MNQ.")
+iMaxQty   = input.int(30, "Max contracts", minval = 1, group = grpR)
+iSkipBig  = input.bool(false, "Skip if 1 contract risks more than 1.5 x risk", group = grpR)
+
+grpV = "Display"
+iShowBox  = input.bool(true, "Trade boxes", group = grpV)
+iShowEma  = input.bool(true, "EMAs", group = grpV)
+iShowInfo = input.bool(true, "Info table", group = grpV)
+
+// ───────── Time helpers (New York) ─────────
+tfMin  = int(timeframe.in_seconds() / 60)
+mOpen  = hour(time, TZ) * 60 + minute(time, TZ)
+mClose = mOpen + tfMin
+dayKey = year(time, TZ) * 10000 + month(time, TZ) * 100 + dayofmonth(time, TZ)
+inRth  = mOpen >= 570 and mOpen < 960
+flatMin = int(iFlat / 100) * 60 + iFlat % 100
+
+// ───────── Indicators ─────────
+ema9   = ta.ema(close, 9)
+ema21  = ta.ema(close, 21)
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+rsi    = ta.rsi(close, 14)
+
+// ATR_D: mean 09:30-16:00 range of the previous sessions
+var array<float> rngs = array.new_float()
+var float rthH = na
+var float rthL = na
+var int   rthDay = 0
+if inRth
+    if rthDay != dayKey  // first cash-session bar of a new day: store the previous session's range
+        if rthDay != 0
+            array.push(rngs, rthH - rthL)
+            if array.size(rngs) > iAtrDays
+                array.shift(rngs)
+        rthDay := dayKey
+        rthH := high
+        rthL := low
+    else
+        rthH := math.max(rthH, high)
+        rthL := math.min(rthL, low)
+atrD = array.size(rngs) >= 5 ? array.avg(rngs) : na
+
+// ───────── Opening range ─────────
+var float orO = na
+var float orH = na
+var float orL = na
+var int   tradedDay = 0
+inOr = mOpen >= 570 and mOpen < 570 + iOrMin
+if inOr and mOpen == 570
+    orO := open
+    orH := high
+    orL := low
+else if inOr
+    orH := math.max(orH, high)
+    orL := math.min(orL, low)
+signalBar = mClose == 570 + iOrMin and not na(orO)
+
+trendOk(int s) =>
+    switch iTrend
+        "None"      => true
+        "EMA 20/50" => (ema20 - ema50) * s > 0
+        "EMA 9/21"  => (ema9 - ema21) * s > 0
+        "EMA 200"   => (close - ema200) * s > 0
+        => true
+
+var float sigStop = na
+var float sigTgt  = na
+var int   sigSide = 0
+var string status = "waiting for 09:30"
+body = close - orO
+flat = strategy.position_size == 0
+
+if signalBar and flat and tradedDay != dayKey and not na(atrD)
+    s = body > 0 ? 1 : -1
+    bigBody = math.abs(body) >= iMinBody * atrD
+    rsiOk = not iRsiOn or (s > 0 ? rsi > 50 + iRsiX : rsi < 50 - iRsiX)
+    if not bigBody
+        status := "no trade: body " + str.tostring(math.abs(body) / atrD * 100, "#.#") + " % < " + str.tostring(iMinBody * 100, "#.#") + " % ATR_D"
+    else if not trendOk(s)
+        status := "no trade: against " + iTrend
+    else if not rsiOk
+        status := "no trade: RSI filter"
+    else
+        riskPts = iStopAtr * atrD
+        stopPx  = math.round_to_mintick(close - s * riskPts)
+        tgtPx   = math.round_to_mintick(close + s * iRR * riskPts)
+        perCt   = riskPts * syminfo.pointvalue + 2 * 0.80 + syminfo.mintick * syminfo.pointvalue
+        q = math.max(1, math.min(iMaxQty, math.floor(iRiskUsd / perCt)))
+        if iSkipBig and perCt > 1.5 * iRiskUsd
+            status := "no trade: 1 contract > 1.5 x risk"
+        else
+            strategy.entry("OD", s > 0 ? strategy.long : strategy.short, qty = q, comment = s > 0 ? "OD long" : "OD short")
+            strategy.exit("OD x", "OD", stop = stopPx, limit = tgtPx, comment_loss = "SL", comment_profit = "TP")
+            sigStop := stopPx
+            sigTgt  := tgtPx
+            sigSide := s
+            tradedDay := dayKey
+            status := (s > 0 ? "LONG " : "SHORT ") + str.tostring(q) + " MNQ, stop " + str.tostring(stopPx) + ", target " + str.tostring(tgtPx)
+            alert((s > 0 ? "MNQ Opening Drive LONG " : "MNQ Opening Drive SHORT ") + str.tostring(q) + " @ market | stop " +
+                 str.tostring(stopPx) + " | target " + str.tostring(tgtPx) + " | BE after " + str.tostring(iBeAt) + " R", alert.freq_once_per_bar_close)
+else if signalBar and na(atrD)
+    status := "no trade: ATR_D needs 5 sessions of history"
+
+// breakeven after +iBeAt R (checked on the bar close, active from the next bar)
+var bool beDone = false
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    beDone := false
+if strategy.position_size != 0 and iBeAt > 0 and not beDone
+    ep   = strategy.position_avg_price
+    risk = math.abs(ep - sigStop)
+    fav  = strategy.position_size > 0 ? high - ep : ep - low
+    if fav >= iBeAt * risk
+        strategy.exit("OD x", "OD", stop = ep, limit = sigTgt, comment_loss = "BE", comment_profit = "TP")
+        beDone := true
+
+// time exit (also closes anything that would otherwise run into the next session)
+if strategy.position_size != 0 and (mClose >= flatMin or mOpen < 570)
+    strategy.close_all(comment = "Time")
+
+// ───────── Display ─────────
+plot(iShowEma ? ema20 : na, "EMA20", color.new(color.teal, 0))
+plot(iShowEma ? ema50 : na, "EMA50", color.new(color.orange, 0))
+bgcolor(inOr ? color.new(color.blue, 90) : na, title = "Opening range")
+
+var box   bRisk = na
+var box   bTgt  = na
+if iShowBox and strategy.position_size != 0 and strategy.position_size[1] == 0
+    ep = strategy.position_avg_price
+    bRisk := box.new(bar_index, ep, bar_index + 1, sigStop, border_color = color.new(color.red, 60), bgcolor = color.new(color.red, 85))
+    bTgt  := box.new(bar_index, ep, bar_index + 1, sigTgt, border_color = color.new(color.green, 60), bgcolor = color.new(color.green, 88))
+if iShowBox and strategy.position_size != 0 and not na(bRisk)
+    box.set_right(bRisk, bar_index + 1)
+    box.set_right(bTgt, bar_index + 1)
+if strategy.closedtrades > strategy.closedtrades[1]
+    n = strategy.closedtrades - 1
+    pnl = strategy.closedtrades.profit(n)
+    label.new(bar_index, pnl >= 0 ? high : low, (pnl >= 0 ? "+" : "") + str.tostring(pnl, "#") + " $",
+         style = pnl >= 0 ? label.style_label_down : label.style_label_up,
+         color = pnl >= 0 ? color.new(color.green, 20) : color.new(color.red, 20), textcolor = color.white, size = size.small)
+
+var table info = table.new(position.top_right, 2, 5, bgcolor = color.new(color.gray, 85), border_width = 1)
+if iShowInfo and barstate.islast
+    table.cell(info, 0, 0, "ATR_D (pts)", text_size = size.small)
+    table.cell(info, 1, 0, na(atrD) ? "n/a" : str.tostring(atrD, "#.0"), text_size = size.small)
+    table.cell(info, 0, 1, "Min body / stop (pts)", text_size = size.small)
+    table.cell(info, 1, 1, na(atrD) ? "n/a" : str.tostring(iMinBody * atrD, "#.0") + " / " + str.tostring(iStopAtr * atrD, "#.0"), text_size = size.small)
+    table.cell(info, 0, 2, "Trend", text_size = size.small)
+    table.cell(info, 1, 2, ema20 > ema50 ? "EMA20 > EMA50 (long only)" : "EMA20 < EMA50 (short only)", text_size = size.small)
+    table.cell(info, 0, 3, "Today", text_size = size.small)
+    table.cell(info, 1, 3, status, text_size = size.small)
+    table.cell(info, 0, 4, "Chart TF / tick", text_size = size.small)
+    table.cell(info, 1, 4, timeframe.period + " / " + str.tostring(syminfo.mintick), text_size = size.small)
