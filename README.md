@@ -64,6 +64,10 @@ Ursache der Abweichung: Wurde TP1 schon in der ersten Kerze nach dem Einstieg er
 Stop nicht auf Breakeven (7 Trades endeten mit Verlust statt ±0). Behoben; danach sollte TradingView wieder
 nahe am Python-Ergebnis liegen (27 Positionen, PF 2,28, +1.758 $, max. DD 574 $ im selben Zeitraum).
 
+**Nach der Korrektur bestätigt TradingView das Ergebnis** (Export 04.08.–25.09., MNQ1! 5m): 28 Positionen,
+Trefferquote 78,6 %, PF 2,07, +1.605 $, max. DD 578 $. 27 von 27 Python-Positionen stimmen auf < 10 $ genau überein;
+einzige Abweichung ist ein zusätzlicher Swing-Long am 07.09. (−124 $) nur in TradingView.
+
 Preis dafür: etwas weniger Nettogewinn, weil der zweite Kontrakt öfter auf Breakeven ausgestoppt wird.
 Weiterhin gilt: 48 Handelstage und viele getestete Varianten. Die Bestätigung muss über längere Historie kommen.
 
