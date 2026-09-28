@@ -119,7 +119,7 @@ Die ersten 60 % der Tage dienten der Entwicklung (In-Sample), die letzten 40 % w
 | Out-of-Sample | 12 | 58,3 % | 0,98 | −0,08 | −35 $ | 908 $ |
 | Gesamt | 25 | 56,0 % | 1,20 | +0,05 | +709 $ | 908 $ |
 
-Reproduzieren: `python backtest/sweep_backtest.py --tf 5m --trend none --risk-atr 0`.
+Diese Zahlen entstanden mit TP1 = 1R und den Daten bis 24.09. (vor den Standardwerten von Version 3).
 M15 hatte nur 6 Trades in 48 Tagen und war statistisch wertlos. Das Ergebnis hing an einzelnen Trades
 (mit max. 100 Punkten Stop: −2.221 $). Echte Scalps mit engem Stop funktionieren auf MNQ zur NY-Eröffnung nicht:
 Die Stops liegen im Median bei ~90 Punkten (~180 $ pro Kontrakt).
