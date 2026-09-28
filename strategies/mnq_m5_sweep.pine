@@ -10,8 +10,8 @@
 //     opposite extreme confirms the rejection (optional: FVG required).
 //  4. Entry market on the confirmation close (or limit at OTE retracement).
 //     Stop 2 ticks beyond the sweep extreme.
-//  5. Protection: TP1 at 1R closes 50 %, stop of the rest moves to breakeven,
-//     TP2 at 2R. Everything flat at 11:30 ET. (Default TP1 = 0.5R: higher hit rate, lower drawdown.)
+//  5. Protection: TP1 at 0.5R closes 50 %, stop of the rest moves to breakeven,
+//     TP2 at 2R. Everything flat at 11:30 ET. ORB only if its stop is <= 100 points.
 //  6. Filters (both setups): direction, trend (default EMA20 > EMA50 for longs, below for shorts),
 //     optional minimum ATR and minimum Kaufman efficiency ratio (chop filter).
 //  7. ORB module (backtest/orb_backtest.py): first close beyond the 09:30-09:35 range, stop at the
