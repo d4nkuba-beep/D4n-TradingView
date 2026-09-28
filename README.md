@@ -118,6 +118,24 @@ python g_orb.py; python g_sweep.py; python g_bos.py; python g_more.py; python g_
 3. Unter Einstellungen „Risiko pro Trade ($)“ an das Konto anpassen. Auf einem 3-Minuten-Chart „Opening range“ auf 6 stellen.
 4. Alarm: „Alarm erstellen“ → Bedingung: diese Strategie → „alert() function calls only“. Die Meldung enthält Richtung, Stückzahl, Stop und Ziel.
 
+## TradersPost-Webhook (Sweep + ORB, `strategies/mnq_m5_sweep.pine`)
+
+Das Script erzeugt fertige TradersPost-JSON-Nachrichten (Einstellungen → „TradersPost webhook“):
+
+| Ereignis | JSON (Beispiel) |
+|---|---|
+| Einstieg | `{"ticker":"MNQZ2026","action":"buy","orderType":"market","quantity":2,"price":30252.25,"stopLoss":{"type":"stop","stopPrice":30210.5},"extras":{"setup":"ORB"}}` |
+| Limit-Einstieg (OTE) | wie oben mit `"orderType":"limit","limitPrice":…` |
+| TP1 (Teilausstieg) | `{"ticker":"MNQZ2026","action":"exit","quantity":1}` |
+| Stop auf Einstand | `{"ticker":"MNQZ2026","action":"breakeven","orderType":"stop"}` |
+| TP2 / SL / BE / Zeit | `{"ticker":"MNQZ2026","action":"exit","cancel":true}` |
+| Limit-Order verfällt | `{"ticker":"MNQZ2026","action":"cancel"}` |
+
+Alarm anlegen: Bedingung = diese Strategie, „Order fills and alert() function calls“, Nachricht = `{{strategy.order.alert_message}}`,
+Webhook-URL = URL der TradersPost-Strategie. Bei eingeschaltetem Webhook sendet das Script keine Text-Alarme (TradersPost würde sie ablehnen).
+Als Ticker den konkreten Kontrakt eintragen (z. B. `MNQZ2026`, bei jedem Rollover ändern). Zuerst mit einem TradersPost-Paper-Konto testen,
+vor allem ob der Broker-Stop nach dem Teilausstieg auf die Restmenge angepasst wird.
+
 ---
 
 ## Frühere Versionen: NY-Open Sweep + ORB (M5)
