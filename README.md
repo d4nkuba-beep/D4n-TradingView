@@ -2,7 +2,7 @@
 
 ## Version 3 (empfohlen): MNQ Opening Drive (M5)
 
-`strategies/mnq_opening_drive.pine` · Backtest: `backtest/lab/` · Ergebnisse: `backtest/results/`
+`strategies/mnq_m5_opening_drive.pine` · Backtest: `backtest/lab/` · Ergebnisse: `backtest/results/`
 
 ### Regeln
 
@@ -114,7 +114,7 @@ python g_orb.py; python g_sweep.py; python g_bos.py; python g_more.py; python g_
 ### In TradingView laden
 
 1. Chart `CME_MINI:MNQ1!`, **5 Minuten**, Handelszeiten „Electronic Trading Hours“ (EMAs brauchen die Overnight-Kerzen).
-2. Pine Editor → `strategies/mnq_opening_drive.pine` einfügen → „Zum Chart hinzufügen“.
+2. Pine Editor → `strategies/mnq_m5_opening_drive.pine` einfügen → „Zum Chart hinzufügen“.
 3. Unter Einstellungen „Risiko pro Trade ($)“ an das Konto anpassen. Auf einem 3-Minuten-Chart „Opening range“ auf 6 stellen.
 4. Alarm: „Alarm erstellen“ → Bedingung: diese Strategie → „alert() function calls only“. Die Meldung enthält Richtung, Stückzahl, Stop und Ziel.
 

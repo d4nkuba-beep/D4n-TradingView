@@ -1,6 +1,6 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
-// MNQ NY-Open Liquidity Sweep (M5)
+// MNQ NY-Open Liquidity Sweep [M5] - timeframe: 5 minutes
 // Rules (same as backtest/sweep_backtest.py):
 //  1. Levels: previous RTH day high/low, overnight (18:00-09:30) high/low,
 //     Asia (20:00-00:00) and London (02:00-05:00) high/low, plus confirmed
@@ -15,7 +15,7 @@
 //  6. Trend filter (default): long only if EMA20 > EMA50 on the chart timeframe, short only below.
 //  7. ORB module (backtest/orb_backtest.py): first close beyond the 09:30-09:35 range, stop at the
 //     range midpoint, same exits and trend filter. First signal of the day wins, one position at a time.
-strategy("MNQ NY-Open Sweep + ORB", shorttitle = "MNQ Sweep+ORB", overlay = true,
+strategy("MNQ NY-Open Sweep + ORB [M5]", shorttitle = "MNQ Sweep+ORB M5", overlay = true,
      initial_capital = 25000, default_qty_type = strategy.fixed, default_qty_value = 2,
      margin_long = 0, margin_short = 0,   // no margin check: with the v6 default (100 %) 2 MNQ need ~$120k and every order is rejected
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.62,

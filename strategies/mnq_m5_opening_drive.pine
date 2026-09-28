@@ -1,6 +1,6 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
-// MNQ Opening Drive (M5)  -  rules identical to backtest/lab (FirstCandle)
+// MNQ Opening Drive [M5] - timeframe: 5 minutes (3 minutes: set Opening range = 6)  -  rules identical to backtest/lab (FirstCandle)
 //  1. Opening range = first 5 minutes of the cash session (09:30-09:35 New York).
 //  2. Displacement: the body of that candle (close - open) must be at least
 //     10 % of ATR_D (average 09:30-16:00 range of the previous 14 sessions).
@@ -9,7 +9,7 @@
 //  5. Stop: 0.10 x ATR_D from the signal close. Target 10 R. Stop to breakeven after +2 R.
 //  6. Everything flat at 15:55. Size: fixed $ risk per trade -> number of MNQ.
 // Backtest 2023-01 .. 2026-09 (Nasdaq-100 M1, conservative fills): PF 2.37, see README.
-strategy("MNQ Opening Drive", shorttitle = "MNQ OD", overlay = true,
+strategy("MNQ Opening Drive [M5]", shorttitle = "MNQ OD M5", overlay = true,
      initial_capital = 50000, default_qty_type = strategy.fixed, default_qty_value = 1,
      margin_long = 0, margin_short = 0,   // no margin check (v6 default 100 % would reject futures orders)
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.80,
