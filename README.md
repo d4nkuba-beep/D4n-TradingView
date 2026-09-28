@@ -118,6 +118,12 @@ python g_orb.py; python g_sweep.py; python g_bos.py; python g_more.py; python g_
 3. Unter Einstellungen „Risiko pro Trade ($)“ an das Konto anpassen. Auf einem 3-Minuten-Chart „Opening range“ auf 6 stellen.
 4. Alarm: „Alarm erstellen“ → Bedingung: diese Strategie → „alert() function calls only“. Die Meldung enthält Richtung, Stückzahl, Stop und Ziel.
 
+## TradersPost-Webhook im Opening Drive (`strategies/mnq_m5_opening_drive.pine`)
+
+Einstieg: `{"ticker":"MNQZ2026","action":"buy","orderType":"market","quantity":1,"price":30252.25,"stopLoss":{"type":"stop","stopPrice":30210.5},"takeProfit":{"limitPrice":30670}}`
+(Stop und Ziel als Bracket beim Broker). Nach +2 R: `{"action":"breakeven","orderType":"stop"}`. SL, TP, BE und 15:55: `{"action":"exit","cancel":true}`.
+Alarm wie unten: „Order fills and alert() function calls“, Nachricht `{{strategy.order.alert_message}}`.
+
 ## TradersPost-Webhook (Sweep + ORB, `strategies/mnq_m5_sweep.pine`)
 
 Das Script erzeugt fertige TradersPost-JSON-Nachrichten (Einstellungen → „TradersPost webhook“):

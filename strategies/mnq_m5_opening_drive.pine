@@ -9,7 +9,7 @@
 //  5. Stop: 0.10 x ATR_D from the signal close. Target 10 R. Stop to breakeven after +2 R.
 //  6. Everything flat at 15:55. Size: fixed $ risk per trade -> number of MNQ.
 // Backtest 2023-01 .. 2026-09 (Nasdaq-100 M1, conservative fills): PF 2.37, see README.
-strategy("MNQ Opening Drive [M5]", shorttitle = "MNQ OD M5", overlay = true,
+strategy("MNQ Opening Drive [M5] TradersPost", shorttitle = "MNQ OD M5 TP", overlay = true,
      initial_capital = 50000, default_qty_type = strategy.fixed, default_qty_value = 1,
      margin_long = 0, margin_short = 0,   // no margin check (v6 default 100 % would reject futures orders)
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.80,
@@ -40,10 +40,20 @@ iRiskUsd  = input.float(150, "Risk per trade ($)", minval = 10, group = grpR,
 iMaxQty   = input.int(30, "Max contracts", minval = 1, group = grpR)
 iSkipBig  = input.bool(false, "Skip if 1 contract risks more than 1.5 x risk", group = grpR)
 
+grpW = "TradersPost webhook"
+iTpOn     = input.bool(true, "Send TradersPost JSON", group = grpW,
+     tooltip = "Alert: condition = this strategy, 'Order fills and alert() function calls', message = {{strategy.order.alert_message}}, webhook URL = your TradersPost strategy URL.")
+iTpTicker = input.string("", "TradersPost ticker (empty = chart symbol)", group = grpW,
+     tooltip = "Recommended: the explicit contract, e.g. MNQZ2026 (change it at every roll). Empty sends the chart symbol, e.g. MNQ1!.")
+iTpBracket = input.bool(true, "Send stop loss + take profit with the entry (bracket at the broker)", group = grpW)
+
 grpV = "Display"
 iShowBox  = input.bool(true, "Trade boxes", group = grpV)
 iShowEma  = input.bool(true, "EMAs", group = grpV)
 iShowInfo = input.bool(true, "Info table", group = grpV)
+
+// TradersPost: entry = market order with stop loss + take profit (bracket), stop to breakeven via
+// "breakeven" signal after +2 R, every exit (SL / TP / BE / 15:55) sends "exit" with cancel = true.
 
 // ───────── Time helpers (New York) ─────────
 tfMin  = int(timeframe.in_seconds() / 60)
@@ -52,6 +62,17 @@ mClose = mOpen + tfMin
 dayKey = year(time, TZ) * 10000 + month(time, TZ) * 100 + dayofmonth(time, TZ)
 inRth  = mOpen >= 570 and mOpen < 960
 flatMin = int(iFlat / 100) * 60 + iFlat % 100
+
+// ───────── TradersPost JSON ─────────
+tpTicker = iTpTicker == "" ? syminfo.ticker : iTpTicker
+jNum(float x) => str.tostring(x, format.mintick)
+tpHead(string action) => '{"ticker":"' + tpTicker + '","action":"' + action + '"'
+tpEntry(int s, int q, float sl, float tp) =>
+    iTpOn ? tpHead(s > 0 ? "buy" : "sell") + ',"orderType":"market","quantity":' + str.tostring(q) + ',"price":' + jNum(close) +
+         (iTpBracket ? ',"stopLoss":{"type":"stop","stopPrice":' + jNum(sl) + '},"takeProfit":{"limitPrice":' + jNum(tp) + '}' : "") +
+         ',"extras":{"setup":"Opening Drive"}}' : ""
+tpExitAll() => iTpOn ? tpHead("exit") + ',"cancel":true}' : ""
+tpBreakeven() => tpHead("breakeven") + ',"orderType":"stop"}'
 
 // ───────── Indicators ─────────
 ema9   = ta.ema(close, 9)
@@ -129,15 +150,18 @@ if signalBar and flat and tradedDay != dayKey and not na(atrD)
         if iSkipBig and perCt > 1.5 * iRiskUsd
             status := "no trade: 1 contract > 1.5 x risk"
         else
-            strategy.entry("OD", s > 0 ? strategy.long : strategy.short, qty = q, comment = s > 0 ? "OD long" : "OD short")
-            strategy.exit("OD x", "OD", stop = stopPx, limit = tgtPx, comment_loss = "SL", comment_profit = "TP")
+            strategy.entry("OD", s > 0 ? strategy.long : strategy.short, qty = q, comment = s > 0 ? "OD long" : "OD short",
+                 alert_message = tpEntry(s, q, stopPx, tgtPx))
+            strategy.exit("OD x", "OD", stop = stopPx, limit = tgtPx, comment_loss = "SL", comment_profit = "TP",
+                 alert_profit = tpExitAll(), alert_loss = tpExitAll())
             sigStop := stopPx
             sigTgt  := tgtPx
             sigSide := s
             tradedDay := dayKey
             status := (s > 0 ? "LONG " : "SHORT ") + str.tostring(q) + " MNQ, stop " + str.tostring(stopPx) + ", target " + str.tostring(tgtPx)
-            alert((s > 0 ? "MNQ Opening Drive LONG " : "MNQ Opening Drive SHORT ") + str.tostring(q) + " @ market | stop " +
-                 str.tostring(stopPx) + " | target " + str.tostring(tgtPx) + " | BE after " + str.tostring(iBeAt) + " R", alert.freq_once_per_bar_close)
+            if not iTpOn  // TradersPost rejects plain text, the JSON goes with the order fill instead
+                alert((s > 0 ? "MNQ Opening Drive LONG " : "MNQ Opening Drive SHORT ") + str.tostring(q) + " @ market | stop " +
+                     str.tostring(stopPx) + " | target " + str.tostring(tgtPx) + " | BE after " + str.tostring(iBeAt) + " R", alert.freq_once_per_bar_close)
 else if signalBar and na(atrD)
     status := "no trade: ATR_D needs 5 sessions of history"
 
@@ -150,12 +174,15 @@ if strategy.position_size != 0 and iBeAt > 0 and not beDone
     risk = math.abs(ep - sigStop)
     fav  = strategy.position_size > 0 ? high - ep : ep - low
     if fav >= iBeAt * risk
-        strategy.exit("OD x", "OD", stop = ep, limit = sigTgt, comment_loss = "BE", comment_profit = "TP")
+        strategy.exit("OD x", "OD", stop = ep, limit = sigTgt, comment_loss = "BE", comment_profit = "TP",
+             alert_profit = tpExitAll(), alert_loss = tpExitAll())
         beDone := true
+        if iTpOn
+            alert(tpBreakeven(), alert.freq_once_per_bar_close)
 
 // time exit (also closes anything that would otherwise run into the next session)
 if strategy.position_size != 0 and (mClose >= flatMin or mOpen < 570)
-    strategy.close_all(comment = "Time")
+    strategy.close_all(comment = "Time", alert_message = tpExitAll())
 
 // ───────── Display ─────────
 plot(iShowEma ? ema20 : na, "EMA20", color.new(color.teal, 0))
