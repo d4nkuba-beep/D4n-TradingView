@@ -59,6 +59,11 @@ Mindest-ATR, ER-Länge/-Minimum), standardmäßig neutral.
 | 04.08.–24.09. (TradingView-Zeitraum, neu) | 26 | 80,8 % | 2,19 | +1.636 $ | 574 $ |
 | 04.08.–24.09. (TradingView-Export, Version 2) | 28 | 60,7 % | 1,60 | +1.728 $ | ~1.170 $ |
 
+TradingView-Export der ersten Version-3-Fassung (04.08.–25.09.): 28 Positionen, PF 1,57, +1.042 $.
+Ursache der Abweichung: Wurde TP1 schon in der ersten Kerze nach dem Einstieg erreicht, zog das Script den
+Stop nicht auf Breakeven (7 Trades endeten mit Verlust statt ±0). Behoben; danach sollte TradingView wieder
+nahe am Python-Ergebnis liegen (27 Positionen, PF 2,28, +1.758 $, max. DD 574 $ im selben Zeitraum).
+
 Preis dafür: etwas weniger Nettogewinn, weil der zweite Kontrakt öfter auf Breakeven ausgestoppt wird.
 Weiterhin gilt: 48 Handelstage und viele getestete Varianten. Die Bestätigung muss über längere Historie kommen.
 

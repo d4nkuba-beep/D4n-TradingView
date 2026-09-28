@@ -332,8 +332,10 @@ if not flat and strategy.position_size[1] == 0
     pendBar := na
     tp1Done := false
 
-// after TP1: move the remaining stop to breakeven
-if not flat and not tp1Done and math.abs(strategy.position_size) < math.abs(strategy.position_size[1])
+// after TP1: move the remaining stop to breakeven. A partial exit shows up as a new closed trade while
+// the position is still open - this also catches TP1 in the first bar after the entry, where
+// position_size[1] is still 0 (the entry fills at the close of the signal bar).
+if not flat and not tp1Done and strategy.closedtrades > strategy.closedtrades[1]
     tp1Done := true
     if iBe
         tStop := strategy.position_avg_price
