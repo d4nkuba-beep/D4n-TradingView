@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+backtest/data/hist/*.csv
+backtest/data/hist/*.zip
+backtest/data/hist/*.gz
+backtest/data/hist/*.pkl

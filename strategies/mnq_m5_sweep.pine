@@ -1,6 +1,6 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=6
-// MNQ NY-Open Liquidity Sweep (M5)
+// MNQ NY-Open Liquidity Sweep [M1/M5] - timeframe: 1 or 5 minutes, TradersPost webhook built in
 // Rules (same as backtest/sweep_backtest.py):
 //  1. Levels: previous RTH day high/low, overnight (18:00-09:30) high/low,
 //     Asia (20:00-00:00) and London (02:00-05:00) high/low, plus confirmed
@@ -16,7 +16,7 @@
 //     optional minimum ATR and minimum Kaufman efficiency ratio (chop filter).
 //  7. ORB module (backtest/orb_backtest.py): first close beyond the 09:30-09:35 range, stop at the
 //     range midpoint, same exits and trend filter. First signal of the day wins, one position at a time.
-strategy("MNQ NY-Open Sweep + ORB", shorttitle = "MNQ Sweep+ORB", overlay = true,
+strategy("MNQ NY-Open Sweep + ORB [M1/M5] TradersPost", shorttitle = "MNQ Sweep+ORB M1/M5 TP", overlay = true,
      initial_capital = 25000, default_qty_type = strategy.fixed, default_qty_value = 2,
      margin_long = 0, margin_short = 0,   // no margin check: with the v6 default (100 %) 2 MNQ need ~$120k and every order is rejected
      commission_type = strategy.commission.cash_per_contract, commission_value = 0.62,
@@ -80,6 +80,13 @@ iTp2R    = input.float(2.0, "TP2 (R)", step = 0.25, group = grpR)
 iTp1Pct  = input.int(50, "TP1 size (%)", minval = 1, maxval = 99, group = grpR)
 iBe      = input.bool(true, "Move stop to breakeven after TP1", group = grpR)
 
+grpW = "TradersPost webhook"
+iTpOn     = input.bool(true, "Send TradersPost JSON", group = grpW,
+     tooltip = "Alert: condition = this strategy, 'Order fills and alert() function calls', message = {{strategy.order.alert_message}}, webhook URL = your TradersPost strategy URL.")
+iTpTicker = input.string("", "TradersPost ticker (empty = chart symbol)", group = grpW,
+     tooltip = "Recommended: the explicit contract, e.g. MNQZ2026 (change it at every roll). Empty sends the chart symbol, e.g. MNQ1!.")
+iTpBrokerSl = input.bool(true, "Send stop loss with the entry (protective stop at the broker)", group = grpW)
+
 // ───────── Time helpers ─────────
 hhmm(t) => hour(t, TZ) * 100 + minute(t, TZ)
 tod     = hhmm(time)
@@ -87,6 +94,24 @@ todPrev = hhmm(time[1])
 // true on the first bar at/after hhmm x (also across midnight / weekend gaps)
 crossed(x) => tod >= x and (todPrev < x or tod < todPrev)
 tick = syminfo.mintick
+
+// ───────── TradersPost JSON ─────────
+tpTicker = iTpTicker == "" ? syminfo.ticker : iTpTicker
+jNum(float x) => str.tostring(x, format.mintick)
+tpHead(string action) => '{"ticker":"' + tpTicker + '","action":"' + action + '"'
+tpEntry(int s, bool isLimit, float lim, float sl, string tag) =>
+    int q = int(strategy.default_entry_qty(close))
+    iTpOn ? tpHead(s > 0 ? "buy" : "sell") + ',"orderType":"' + (isLimit ? 'limit","limitPrice":' + jNum(lim) : 'market"') +
+         ',"quantity":' + str.tostring(q) + ',"price":' + jNum(isLimit ? lim : close) +
+         (iTpBrokerSl ? ',"stopLoss":{"type":"stop","stopPrice":' + jNum(sl) + '}' : "") +
+         ',"extras":{"setup":"' + tag + '"}}' : ""
+// "price" goes into every message: with Tradovate (e.g. Apex) TradersPost cannot fetch quotes
+tpExitAll(float px) => iTpOn ? tpHead("exit") + ',"price":' + jNum(px) + ',"cancel":true}' : ""
+tpExitQty(float px) =>
+    int q1 = int(math.floor(strategy.default_entry_qty(close) * iTp1Pct / 100))
+    iTpOn ? tpHead("exit") + ',"quantity":' + str.tostring(q1) + ',"price":' + jNum(px) + '}' : ""
+tpBreakeven() => tpHead("breakeven") + ',"orderType":"stop","price":' + jNum(close) + '}'
+tpCancel() => tpHead("cancel") + ',"price":' + jNum(close) + '}'
 
 // ───────── Filters (all known at bar close) ─────────
 emaF   = ta.ema(close, iEmaFast)
@@ -302,8 +327,10 @@ pending = not na(pendBar)
 inWindow = tod >= iStart and tod <= iLastEntry and tradesToday < iMaxTrades and lossesToday < iMaxLosses
 
 placeExits() =>
-    strategy.exit("TP1", "Sweep", qty_percent = iTp1Pct, limit = tTp1, stop = tStop, comment_profit = "TP1", comment_loss = "SL")
-    strategy.exit("TP2", "Sweep", limit = tTp2, stop = tStop, comment_profit = "TP2", comment_loss = "SL")
+    strategy.exit("TP1", "Sweep", qty_percent = iTp1Pct, limit = tTp1, stop = tStop, comment_profit = "TP1", comment_loss = "SL",
+         alert_profit = tpExitQty(tTp1), alert_loss = tpExitAll(tStop))
+    strategy.exit("TP2", "Sweep", limit = tTp2, stop = tStop, comment_profit = "TP2", comment_loss = "SL",
+         alert_profit = tpExitAll(tTp2), alert_loss = tpExitAll(tStop))
 
 // structure before the sweep (computed every bar so the ta.* history stays consistent)
 lowestN  = ta.lowest(low, math.max(iStructLb, 1))
@@ -313,9 +340,12 @@ structHi = iStructLb > 0 ? highestN[1] : high
 
 // flat at session end
 if tod >= iFlat and (not flat or pending)
-    strategy.close_all(comment = "Time")
+    if not flat
+        strategy.close_all(comment = "Time", alert_message = tpExitAll(close))
     if pending
         strategy.cancel("Sweep")
+        if iTpOn
+            alert(tpCancel(), alert.freq_once_per_bar_close)
         pendBar := na
         npAtEntry := na
 
@@ -324,6 +354,8 @@ if pending and flat and not justClosed
     ranAway = tTp1 < tEntry ? low <= tTp1 : high >= tTp1
     if bar_index - pendBar >= iPendBars or ranAway
         strategy.cancel("Sweep")
+        if iTpOn
+            alert(tpCancel(), alert.freq_once_per_bar_close)
         pendBar := na
         npAtEntry := na
 
@@ -339,7 +371,10 @@ if not flat and not tp1Done and strategy.closedtrades > strategy.closedtrades[1]
     tp1Done := true
     if iBe
         tStop := strategy.position_avg_price
-        strategy.exit("TP2", "Sweep", limit = tTp2, stop = tStop, comment_profit = "TP2", comment_loss = "BE")
+        strategy.exit("TP2", "Sweep", limit = tTp2, stop = tStop, comment_profit = "TP2", comment_loss = "BE",
+             alert_profit = tpExitAll(tTp2), alert_loss = tpExitAll(tStop))
+        if iTpOn
+            alert(tpBreakeven(), alert.freq_once_per_bar_close)
 
 // ───────── Trade boxes (like the long/short position tool) ─────────
 drawTrade(int eb, float ep) =>
@@ -405,7 +440,8 @@ else
         armSide := newSide
         armBar := bar_index
         dbgSweeps += 1
-        alert("MNQ sweep of " + armName + (newSide < 0 ? " (short setup)" : " (long setup)"), alert.freq_once_per_bar_close)
+        if not iTpOn
+            alert("MNQ sweep of " + armName + (newSide < 0 ? " (short setup)" : " (long setup)"), alert.freq_once_per_bar_close)
 
     if armSide != 0
         s = armSide
@@ -439,16 +475,17 @@ else
                     tTp1 := entry + s * iTp1R * risk
                     tTp2 := entry + s * iTp2R * risk
                     if iEntryMode == "Market"
-                        strategy.entry("Sweep", s > 0 ? strategy.long : strategy.short, comment = armName)
+                        strategy.entry("Sweep", s > 0 ? strategy.long : strategy.short, comment = armName, alert_message = tpEntry(s, false, entry, sl, armName))
                     else
-                        strategy.entry("Sweep", s > 0 ? strategy.long : strategy.short, limit = entry, comment = armName)
+                        strategy.entry("Sweep", s > 0 ? strategy.long : strategy.short, limit = entry, comment = armName, alert_message = tpEntry(s, true, entry, sl, armName))
                         pendBar := bar_index
                     npAtEntry := strategy.netprofit
                     enteredNow := true
                     dbgOrders += 1
                     placeExits()
-                    alert("MNQ " + (s > 0 ? "LONG" : "SHORT") + " entry " + str.tostring(entry) + " SL " + str.tostring(sl) +
-                         " TP1 " + str.tostring(tTp1) + " TP2 " + str.tostring(tTp2), alert.freq_once_per_bar_close)
+                    if not iTpOn
+                        alert("MNQ " + (s > 0 ? "LONG" : "SHORT") + " entry " + str.tostring(entry) + " SL " + str.tostring(sl) +
+                             " TP1 " + str.tostring(tTp1) + " TP2 " + str.tostring(tTp2), alert.freq_once_per_bar_close)
                 armSide := 0
 
 // ───────── Opening range breakout ─────────
@@ -479,12 +516,13 @@ else if iUseOrb and not orbDone and not na(orHi) and todMin >= orEnd and tod <= 
                 slOrig := slO
                 tTp1 := close + so * iTp1R * riskO
                 tTp2 := close + so * iTp2R * riskO
-                strategy.entry("Sweep", so > 0 ? strategy.long : strategy.short, comment = "ORB")
+                strategy.entry("Sweep", so > 0 ? strategy.long : strategy.short, comment = "ORB", alert_message = tpEntry(so, false, close, slO, "ORB"))
                 dbgOrders += 1
                 npAtEntry := strategy.netprofit
                 placeExits()
-                alert("MNQ ORB " + (so > 0 ? "LONG" : "SHORT") + " entry " + str.tostring(close) + " SL " + str.tostring(slO) +
-                     " TP1 " + str.tostring(tTp1) + " TP2 " + str.tostring(tTp2), alert.freq_once_per_bar_close)
+                if not iTpOn
+                    alert("MNQ ORB " + (so > 0 ? "LONG" : "SHORT") + " entry " + str.tostring(close) + " SL " + str.tostring(slO) +
+                         " TP1 " + str.tostring(tTp1) + " TP2 " + str.tostring(tTp2), alert.freq_once_per_bar_close)
 
 // ───────── M15 support / resistance zones (display only, not used for entries) ─────────
 // Zone = wick area of a confirmed M15 swing: resistance from the candle body top to the high,
