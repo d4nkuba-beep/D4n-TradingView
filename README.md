@@ -30,6 +30,38 @@ der Preis dreht, Ziel ist die Gegenseite, Stop über/unter dem Docht, danach „
 
 Kosten im Test: 0,62 $ Kommission pro Kontrakt und Seite plus 1 Tick Slippage. 2 Kontrakte MNQ (2 $/Punkt).
 
+## Version 3: weniger Drawdown, höhere Trefferquote (aktuelle Standardwerte)
+
+Getestet auf MNQ 5m, 17.07.–25.09.2026, jeweils ein Hebel gegen die Basis (Version 2).
+Kriterium: Verbesserung in **beiden** Zeithälften und möglichst allen vier Vierteln, nicht nur der höchste Gewinn.
+
+| Hebel | Ergebnis |
+|---|---|
+| Nur Long | schlechter (PF 1,45) |
+| Nur Short | PF 2,89, DD −40 %, aber nur 16 Trades: Wette auf die Marktphase, nicht übernommen |
+| EMA aus / 9-21 / 50-200 / 9-50 | alle schlechter als 20/50 |
+| ATR-Länge 10 / 20 | kein Effekt (die ATR-Stop-Grenze greift selten) |
+| Mindest-ATR 15–30 Punkte | kein Effekt bzw. schlechter im späten Testteil |
+| ER-Filter (Länge 10/20/30, min. 0,2–0,4) | weniger Trades, später Testteil schlechter |
+| Max. 1 bzw. 3 Trades pro Tag | 1 schlechter, 3 ohne Effekt |
+| Ziel in der Fill-Kerze | irrelevant: Market-Einstieg füllt zum Schlusskurs, Ausstiege frühestens in der nächsten Kerze. Die TradingView-Pfadlogik (erst das nähere Extrem) ändert kein Ergebnis |
+| **TP1 bei 0,5R statt 1R** | **Trefferquote 64 → 81 %, PF 1,85 → 2,11, alle 4 Viertel positiv** |
+| **ORB-Stop max. 100 Punkte** | **größte Risiko-Trades fallen weg, max. DD 996 → 574 $** |
+
+Neue Standardwerte: TP1 = 0,5R (50 %), danach Breakeven, TP2 = 2R, ORB nur bei Stop ≤ 100 Punkten.
+Alle anderen Hebel sind als Einstellungen im Pine-Script vorhanden (Richtung, EMA-Längen, ATR-Länge,
+Mindest-ATR, ER-Länge/-Minimum), standardmäßig neutral.
+
+| Zeitraum | Trades | Trefferquote | PF | Netto | Max. DD |
+|---|---|---|---|---|---|
+| 17.07.–25.09. (Python, neu) | 32 | 81,2 % | 2,23 | +2.174 $ | 574 $ |
+| 17.07.–25.09. (Python, Version 2) | 36 | 63,9 % | 1,85 | +3.242 $ | 996 $ |
+| 04.08.–24.09. (TradingView-Zeitraum, neu) | 26 | 80,8 % | 2,19 | +1.636 $ | 574 $ |
+| 04.08.–24.09. (TradingView-Export, Version 2) | 28 | 60,7 % | 1,60 | +1.728 $ | ~1.170 $ |
+
+Preis dafür: etwas weniger Nettogewinn, weil der zweite Kontrakt öfter auf Breakeven ausgestoppt wird.
+Weiterhin gilt: 48 Handelstage und viele getestete Varianten. Die Bestätigung muss über längere Historie kommen.
+
 ## Version 2: Trendfilter + ORB-Modul
 
 Getestete Ergänzungen (je mit identischen Kosten und Fill-Regeln):

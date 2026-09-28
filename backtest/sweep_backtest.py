@@ -49,12 +49,20 @@ class Params:
     struct_lb: int = 0  # bars before the sweep that define the structure (0 = sweep bar itself)
     need_fvg: bool = False
     trend: str = "ema5_with"  # none | vwap_with | vwap_against | ema5_with | ema1h_with | ema1h_against
-    risk_atr: float = 5.0  # >0: max stop = risk_atr * ATR(14) instead of max_risk
+    risk_atr: float = 5.0  # >0: max stop = risk_atr * ATR(atr_len) instead of max_risk
+    direction: str = "both"  # both | long | short
+    ema_fast: int = 20  # trend filter EMAs (ema5_with); 0 = off
+    ema_slow: int = 50
+    atr_len: int = 14
+    min_atr: float = 0.0  # skip setups while ATR(atr_len) < min_atr points
+    er_len: int = 10  # Kaufman efficiency ratio length
+    er_min: float = 0.0  # skip setups while ER < er_min (0 = off)
+    intrabar: str = "stop_first"  # stop_first | tv (TradingView broker emulator path)
     close_back: bool = False  # sweep bar must close back inside the level
     pending_bars: int = 6  # limit order lifetime
     min_risk: float = 10.0  # points
     max_risk: float = 150.0  # points
-    tp1_r: float = 1.0
+    tp1_r: float = 0.5
     tp2_r: float = 2.0
     be_after_tp1: bool = True
     contracts: int = 2
@@ -111,6 +119,57 @@ def add_indicators(df: pd.DataFrame, step: int) -> None:
     df["ema_h1"] = np.where(idx >= 0, hh.ema.to_numpy()[np.clip(idx, 0, None)], np.nan)
 
 
+def ind(df: pd.DataFrame, kind: str, n: int) -> np.ndarray:
+    """EMA / ATR (Wilder) / Kaufman efficiency ratio of length n, cached as a column."""
+    col = f"_{kind}{n}"
+    if col not in df:
+        if kind == "ema":
+            v = df.c.ewm(span=n, adjust=False).mean()
+        elif kind == "atr":
+            tr = pd.concat([df.h - df.l, (df.h - df.c.shift()).abs(), (df.l - df.c.shift()).abs()], axis=1).max(axis=1)
+            v = tr.ewm(alpha=1 / n, adjust=False).mean()
+        elif kind == "er":
+            v = (df.c - df.c.shift(n)).abs() / df.c.diff().abs().rolling(n).sum()
+        else:
+            raise ValueError(kind)
+        df[col] = v
+    return df[col].to_numpy()
+
+
+def gate(df: pd.DataFrame, i: int, s: int, p) -> bool:
+    """Filters shared by the sweep and the ORB setup (direction, EMA trend, min ATR, ER)."""
+    if (p.direction == "long" and s < 0) or (p.direction == "short" and s > 0):
+        return False
+    if p.ema_fast and (ind(df, "ema", p.ema_fast)[i] - ind(df, "ema", p.ema_slow)[i]) * s <= 0:
+        return False
+    if p.min_atr and ind(df, "atr", p.atr_len)[i] < p.min_atr:
+        return False
+    if p.er_min and not ind(df, "er", p.er_len)[i] >= p.er_min:
+        return False
+    return True
+
+
+def bar_events(s: int, o: float, h: float, l: float, stop: float, tp1: float, tp2: float,
+               tp1_done: bool, mode: str) -> list[str]:
+    """Order of exit fills inside one bar.
+
+    stop_first: if the stop is touched, it fills and targets in that bar are ignored.
+    tv: TradingView's broker emulator path - price goes from the open to the nearer
+        extreme first, then to the other one.
+    """
+    hit_stop = (h >= stop) if s < 0 else (l <= stop)
+    hit_tp1 = not tp1_done and ((l <= tp1) if s < 0 else (h >= tp1))
+    hit_tp2 = (l <= tp2) if s < 0 else (h >= tp2)
+    tps = (["tp1"] if hit_tp1 else []) + (["tp2"] if hit_tp2 and (tp1_done or hit_tp1) else [])
+    favorable_first = False
+    if mode == "tv":
+        up_first = (h - o) <= (o - l)
+        favorable_first = up_first if s > 0 else not up_first
+    if hit_stop and not favorable_first:
+        return ["stop"]
+    return tps + (["stop"] if hit_stop and "tp2" not in tps else [])
+
+
 def trend_ok(p: "Params", s: int, i: int, a: dict) -> bool:
     """Direction filter evaluated on the confirmation bar close."""
     c = a["c"][i]
@@ -121,8 +180,8 @@ def trend_ok(p: "Params", s: int, i: int, a: dict) -> bool:
         return (c - a["vwap"][i]) * s > 0
     if f == "vwap_against":  # reversal back toward VWAP
         return (c - a["vwap"][i]) * s < 0
-    if f == "ema5_with":
-        return (a["ema20"][i] - a["ema50"][i]) * s > 0
+    if f == "ema5_with":  # EMA lengths are applied in gate()
+        return True
     if f == "ema1h_with":
         return (c - a["ema_h1"][i]) * s > 0
     if f == "ema1h_against":
@@ -185,6 +244,32 @@ class Trade:
     result: str = ""
 
 
+def apply_events(tr: Trade, qty: int, stop: float, tp1_done: bool, p, events: list[str]):
+    """Book the fills of one bar. A breakeven stop only takes effect from the next bar
+    (the Pine script moves it at the bar close)."""
+    new_stop, closed = stop, False
+    for ev in events:
+        if ev == "tp1":
+            q1 = qty // 2
+            tr.pnl += q1 * abs(tr.tp1 - tr.entry) * POINT_VALUE
+            qty -= q1
+            tp1_done = True
+            tr.result = "TP1+"
+            if p.be_after_tp1:
+                new_stop = tr.entry
+        elif ev == "tp2":
+            tr.pnl += qty * abs(tr.tp2 - tr.entry) * POINT_VALUE
+            tr.result += "TP2"
+            closed = True
+        else:
+            tr.pnl += qty * (stop - tr.side * TICK - tr.entry) * tr.side * POINT_VALUE
+            tr.result += "BE" if stop == tr.entry else "SL"
+            closed = True
+        if closed:
+            break
+    return qty, new_stop, tp1_done, closed
+
+
 def run(df: pd.DataFrame, p: Params, levels: dict) -> list[Trade]:
     o, h, l, c = (df[k].to_numpy() for k in "ohlc")
     tod = df.tod.to_numpy()
@@ -227,27 +312,9 @@ def run(df: pd.DataFrame, p: Params, levels: dict) -> list[Trade]:
                 s = tr.side
                 closed = False
                 if i > entry_bar:
-                    hit_stop = (h[i] >= stop) if s < 0 else (l[i] <= stop)
-                    hit_tp1 = (l[i] <= tr.tp1) if s < 0 else (h[i] >= tr.tp1)
-                    hit_tp2 = (l[i] <= tr.tp2) if s < 0 else (h[i] >= tr.tp2)
-                    if hit_stop:
-                        fill = stop - s * TICK
-                        tr.pnl += qty * (fill - tr.entry) * s * POINT_VALUE
-                        tr.result += "SL" if not tp1_done else "BE"
-                        closed = True
-                    else:
-                        if not tp1_done and hit_tp1:
-                            q1 = qty // 2
-                            tr.pnl += q1 * abs(tr.tp1 - tr.entry) * POINT_VALUE
-                            qty -= q1
-                            tp1_done = True
-                            tr.result = "TP1+"
-                            if p.be_after_tp1:
-                                stop = tr.entry
-                        if tp1_done and hit_tp2:
-                            tr.pnl += qty * abs(tr.tp2 - tr.entry) * POINT_VALUE
-                            tr.result += "TP2"
-                            closed = True
+                    qty, stop, tp1_done, closed = apply_events(
+                        tr, qty, stop, tp1_done, p,
+                        bar_events(s, o[i], h[i], l[i], stop, tr.tp1, tr.tp2, tp1_done, p.intrabar))
                 if not closed and t >= p.flat:
                     tr.pnl += qty * (c[i] - s * TICK - tr.entry) * s * POINT_VALUE
                     tr.result += "TIME"
@@ -323,7 +390,7 @@ def run(df: pd.DataFrame, p: Params, levels: dict) -> list[Trade]:
                 if not shifted:
                     continue
                 j0 = armed["bar"]
-                if not trend_ok(p, s, i, arr):
+                if not trend_ok(p, s, i, arr) or not gate(df, i, s, p):
                     continue
                 if p.need_fvg:
                     has = any((h[k] < l[k - 2]) if s < 0 else (l[k] > h[k - 2])
@@ -339,7 +406,7 @@ def run(df: pd.DataFrame, p: Params, levels: dict) -> list[Trade]:
                     entry = leg_end + (ext - leg_end) * p.ote
                     entry = round(entry / TICK) * TICK
                 risk = abs(stop - entry)
-                if risk > (p.risk_atr * arr["atr"][i] if p.risk_atr else p.max_risk):
+                if risk > (p.risk_atr * ind(df, "atr", p.atr_len)[i] if p.risk_atr else p.max_risk):
                     armed = None
                     continue
                 if risk < p.min_risk:

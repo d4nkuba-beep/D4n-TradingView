@@ -23,7 +23,8 @@ from datetime import time
 import numpy as np
 import pandas as pd
 
-from sweep_backtest import COMMISSION, POINT_VALUE, TICK, Trade, load, split, stats
+from sweep_backtest import (COMMISSION, POINT_VALUE, TICK, Trade, apply_events, bar_events, gate, load,
+                            split, stats)
 
 
 @dataclass(frozen=True)
@@ -31,21 +32,28 @@ class OrbParams:
     or_min: int = 5
     stop: str = "mid"  # far | mid
     trend: str = "ema5"  # none | vwap | ema5 | ema1h | vwap+ema1h
-    tp1_r: float = 1.0
+    tp1_r: float = 0.5
     tp2_r: float = 2.0
     be_after_tp1: bool = True
     contracts: int = 2
     last_entry: time = time(11, 0)
     flat: time = time(11, 30)
-    max_risk: float = 150.0
+    max_risk: float = 100.0
+    direction: str = "both"
+    ema_fast: int = 20
+    ema_slow: int = 50
+    atr_len: int = 14
+    min_atr: float = 0.0
+    er_len: int = 10
+    er_min: float = 0.0
+    intrabar: str = "stop_first"
 
 
 def trend_ok(f: str, s: int, row) -> bool:
     ok = True
     if "vwap" in f:
         ok &= (row.c - row.vwap) * s > 0
-    if "ema5" in f:
-        ok &= (row.ema20 - row.ema50) * s > 0
+    # "ema5": EMA lengths are applied in gate()
     if "ema1h" in f:
         ok &= (row.c - row.ema_h1) * s > 0
     return bool(ok)
@@ -56,22 +64,10 @@ def manage(day: pd.DataFrame, k: int, tr: Trade, p: OrbParams) -> Trade:
     s, qty, stop, tp1_done = tr.side, p.contracts, tr.stop, False
     for j in range(k + 1, len(day)):
         b = day.iloc[j]
-        if (b.h >= stop) if s < 0 else (b.l <= stop):
-            tr.pnl += qty * (stop - s * TICK - tr.entry) * s * POINT_VALUE
-            tr.result += "BE" if tp1_done else "SL"
-            tr.exit_time = b["dt"]
-            break
-        if not tp1_done and ((b.l <= tr.tp1) if s < 0 else (b.h >= tr.tp1)):
-            q1 = qty // 2
-            tr.pnl += q1 * abs(tr.tp1 - tr.entry) * POINT_VALUE
-            qty -= q1
-            tp1_done = True
-            tr.result = "TP1+"
-            if p.be_after_tp1:
-                stop = tr.entry
-        if tp1_done and ((b.l <= tr.tp2) if s < 0 else (b.h >= tr.tp2)):
-            tr.pnl += qty * abs(tr.tp2 - tr.entry) * POINT_VALUE
-            tr.result += "TP2"
+        qty, stop, tp1_done, closed = apply_events(
+            tr, qty, stop, tp1_done, p,
+            bar_events(s, b.o, b.h, b.l, stop, tr.tp1, tr.tp2, tp1_done, p.intrabar))
+        if closed:
             tr.exit_time = b["dt"]
             break
         if b.tod >= p.flat or j == len(day) - 1:
@@ -90,7 +86,7 @@ def run(df: pd.DataFrame, p: OrbParams, step_min: int) -> list[Trade]:
     for d, day in df[(df.tod >= time(9, 30)) & (df.tod <= p.flat)].groupby("date"):
         if pd.Timestamp(d).weekday() >= 5:
             continue
-        day = day.reset_index(drop=True)
+        day = day.reset_index()  # column "index" = row in df (for the shared filters)
         rng = day[day.tod < or_end]
         if len(rng) < p.or_min // step_min:
             continue
@@ -102,7 +98,7 @@ def run(df: pd.DataFrame, p: OrbParams, step_min: int) -> list[Trade]:
             s = 1 if b.c > hi else -1 if b.c < lo else 0
             if s == 0:
                 continue
-            if not trend_ok(p.trend, s, b):
+            if not trend_ok(p.trend, s, b) or not gate(df, int(b["index"]), s, p):
                 break  # first breakout decides the day
             entry = b.c + s * TICK
             stop = (lo if s > 0 else hi) if p.stop == "far" else (hi + lo) / 2

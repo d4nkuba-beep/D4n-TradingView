@@ -11,8 +11,9 @@
 //  4. Entry market on the confirmation close (or limit at OTE retracement).
 //     Stop 2 ticks beyond the sweep extreme.
 //  5. Protection: TP1 at 1R closes 50 %, stop of the rest moves to breakeven,
-//     TP2 at 2R. Everything flat at 11:30 ET.
-//  6. Trend filter (default): long only if EMA20 > EMA50 on the chart timeframe, short only below.
+//     TP2 at 2R. Everything flat at 11:30 ET. (Default TP1 = 0.5R: higher hit rate, lower drawdown.)
+//  6. Filters (both setups): direction, trend (default EMA20 > EMA50 for longs, below for shorts),
+//     optional minimum ATR and minimum Kaufman efficiency ratio (chop filter).
 //  7. ORB module (backtest/orb_backtest.py): first close beyond the 09:30-09:35 range, stop at the
 //     range midpoint, same exits and trend filter. First signal of the day wins, one position at a time.
 strategy("MNQ NY-Open Sweep + ORB", shorttitle = "MNQ Sweep+ORB", overlay = true,
@@ -56,8 +57,15 @@ iEntryMode = input.string("Market", "Entry", options = ["Market", "OTE limit"], 
 iOte       = input.float(0.5, "OTE retracement", minval = 0.1, maxval = 0.95, step = 0.05, group = grpE)
 iPendBars  = input.int(6, "Limit order lifetime (bars)", minval = 1, group = grpE)
 
-grpT = "Trend filter"
-iTrend = input.string("EMA 20/50", "Direction filter", options = ["None", "EMA 20/50", "Price vs VWAP", "Price vs H1 EMA50"], group = grpT)
+grpT = "Filters"
+iDir     = input.string("Both", "Trade direction", options = ["Both", "Long only", "Short only"], group = grpT)
+iTrend   = input.string("EMA fast/slow", "Trend filter", options = ["None", "EMA fast/slow", "Price vs VWAP", "Price vs H1 EMA50"], group = grpT)
+iEmaFast = input.int(20, "EMA fast", minval = 1, group = grpT)
+iEmaSlow = input.int(50, "EMA slow", minval = 2, group = grpT)
+iAtrLen  = input.int(14, "ATR length", minval = 1, group = grpT)
+iMinAtr  = input.float(0.0, "Min ATR (points, 0 = off)", minval = 0, group = grpT)
+iErLen   = input.int(10, "ER length (efficiency ratio)", minval = 2, group = grpT)
+iErMin   = input.float(0.0, "Min ER (0 = off, e.g. 0.2)", minval = 0, maxval = 1, step = 0.05, group = grpT)
 
 grpO = "Opening range breakout"
 iUseOrb = input.bool(true, "Trade ORB", group = grpO)
@@ -65,9 +73,9 @@ iOrbMin = input.int(5, "Opening range (minutes after 09:30)", minval = 1, group 
 
 grpR = "Risk & protection"
 iMinRisk = input.float(10.0,  "Min stop (points)", group = grpR)
-iMaxRisk = input.float(150.0, "Max stop (points) - skip if larger", group = grpR)
-iRiskAtr = input.float(5.0, "Sweep: max stop in ATR(14) (0 = use points)", minval = 0, step = 0.5, group = grpR)
-iTp1R    = input.float(1.0, "TP1 (R)", step = 0.25, group = grpR)
+iMaxRisk = input.float(100.0, "Max stop (points) - ORB, and sweep if ATR cap = 0", group = grpR)
+iRiskAtr = input.float(5.0, "Sweep: max stop in ATR (0 = use points)", minval = 0, step = 0.5, group = grpR)
+iTp1R    = input.float(0.5, "TP1 (R)", step = 0.25, group = grpR)
 iTp2R    = input.float(2.0, "TP2 (R)", step = 0.25, group = grpR)
 iTp1Pct  = input.int(50, "TP1 size (%)", minval = 1, maxval = 99, group = grpR)
 iBe      = input.bool(true, "Move stop to breakeven after TP1", group = grpR)
@@ -81,17 +89,22 @@ crossed(x) => tod >= x and (todPrev < x or tod < todPrev)
 tick = syminfo.mintick
 
 // ───────── Filters (all known at bar close) ─────────
-ema20  = ta.ema(close, 20)
-ema50  = ta.ema(close, 50)
-atr14  = ta.atr(14)
+emaF   = ta.ema(close, iEmaFast)
+emaS   = ta.ema(close, iEmaSlow)
+atrV   = ta.atr(iAtrLen)
+erV    = math.abs(close - close[iErLen]) / math.sum(math.abs(ta.change(close)), iErLen)
 vwapV  = ta.vwap(hlc3, crossed(930))
 emaH1  = request.security(syminfo.tickerid, "60", ta.ema(close, 50)[1], lookahead = barmerge.lookahead_on)
 trendOk(int s) =>
     switch iTrend
-        "EMA 20/50"         => (ema20 - ema50) * s > 0
+        "EMA fast/slow"     => (emaF - emaS) * s > 0
         "Price vs VWAP"     => (close - vwapV) * s > 0
         "Price vs H1 EMA50" => (close - emaH1) * s > 0
         => true
+// all entry filters for a trade in direction s (+1 long, -1 short)
+gateOk(int s) =>
+    dirOk = iDir == "Both" or (iDir == "Long only" and s > 0) or (iDir == "Short only" and s < 0)
+    dirOk and trendOk(s) and (iMinAtr == 0 or atrV >= iMinAtr) and (iErMin == 0 or erV >= iErMin)
 
 // ───────── Level store ─────────
 var float[]  lvPx   = array.new_float()
@@ -405,7 +418,7 @@ else
                 for off = 0 to bar_index - armBar - 1
                     if s < 0 ? high[off] < low[off + 2] : low[off] > high[off + 2]
                         hasFvg := true
-            if shifted and hasFvg and trendOk(s)
+            if shifted and hasFvg and gateOk(s)
                 float sl = s < 0 ? armExt + 2 * tick : armExt - 2 * tick
                 float entry = close
                 if iEntryMode == "OTE limit"
@@ -414,7 +427,7 @@ else
                         legEnd := s < 0 ? math.min(legEnd, low[off]) : math.max(legEnd, high[off])
                     entry := math.round_to_mintick(legEnd + (armExt - legEnd) * iOte)
                 float risk = math.abs(sl - entry)
-                if risk <= (iRiskAtr > 0 ? iRiskAtr * atr14 : iMaxRisk)
+                if risk <= (iRiskAtr > 0 ? iRiskAtr * atrV : iMaxRisk)
                     if risk < iMinRisk
                         sl := entry - s * iMinRisk
                         risk := iMinRisk
@@ -455,7 +468,7 @@ else if iUseOrb and not orbDone and not na(orHi) and todMin >= orEnd and tod <= 
         orbDone := true   // the first breakout decides the day
         dbgOrb += 1
         freeNow = strategy.position_size == 0 and na(pendBar) and not enteredNow and not justClosed and inWindow
-        if freeNow and trendOk(so)
+        if freeNow and gateOk(so)
             float slO = (orHi + orLo) / 2 - so * 2 * tick
             float riskO = math.abs(close - slO)
             if riskO > 0 and riskO <= iMaxRisk
@@ -527,8 +540,8 @@ plot(showTrade ? tStop : na, "Stop", color.red,   2, plot.style_linebr)
 plot(showTrade ? tTp1  : na, "TP1",  color.lime,  1, plot.style_linebr)
 plot(showTrade ? tTp2  : na, "TP2",  color.green, 2, plot.style_linebr)
 plot(showTrade ? tEntry : na, "Entry", color.gray, 1, plot.style_linebr)
-plot(iTrend == "EMA 20/50" ? ema20 : na, "EMA 20", color.new(color.orange, 20))
-plot(iTrend == "EMA 20/50" ? ema50 : na, "EMA 50", color.new(color.purple, 20))
+plot(iTrend == "EMA fast/slow" ? emaF : na, "EMA fast", color.new(color.orange, 20))
+plot(iTrend == "EMA fast/slow" ? emaS : na, "EMA slow", color.new(color.purple, 20))
 plot(iTrend == "Price vs VWAP" and tod >= 930 and tod < 1600 ? vwapV : na, "VWAP", color.new(color.blue, 20), style = plot.style_linebr)
 bgcolor(tod >= iStart and tod <= iLastEntry ? color.new(color.blue, 94) : na, title = "Entry window")
 
