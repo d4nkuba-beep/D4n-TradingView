@@ -7,7 +7,7 @@
 //  3. Trend filter: long only if EMA20 > EMA50 (chart timeframe, ETH data), short only below.
 //  4. Entry: market at 09:35 in the direction of the candle. One trade per day.
 //  5. Stop: 0.10 x ATR_D from the signal close. Target 10 R. Stop to breakeven after +2 R.
-//  6. Everything flat at 15:55. Size: fixed $ risk per trade -> number of MNQ.
+//  6. Everything flat at 15:55. Size: fixed number of MNQ (default 1) or fixed $ risk per trade.
 // Backtest 2023-01 .. 2026-09 (Nasdaq-100 M1, conservative fills): PF 2.37, see README.
 strategy("MNQ Opening Drive [M5] TradersPost", shorttitle = "MNQ OD M5 TP", overlay = true,
      initial_capital = 50000, default_qty_type = strategy.fixed, default_qty_value = 1,
@@ -34,7 +34,10 @@ iRR       = input.float(10.0, "Target (R)", minval = 0.5, step = 0.5, group = gr
 iBeAt     = input.float(2.0, "Stop to breakeven after (R, 0 = off)", minval = 0, step = 0.5, group = grpX)
 iFlat     = input.int(1555, "Flat at (hhmm New York)", group = grpX)
 
-grpR = "Risk (prop account)"
+grpR = "Position size (prop account)"
+iSizeMode = input.string("Fixed contracts", "Size mode", options = ["Fixed contracts", "Risk $ per trade"], group = grpR)
+iQty      = input.int(1, "Contracts (MNQ) per trade", minval = 1, group = grpR,
+     tooltip = "Used in 'Fixed contracts' mode: every trade opens exactly this many MNQ.")
 iRiskUsd  = input.float(150, "Risk per trade ($)", minval = 10, group = grpR,
      tooltip = "50k evaluation: 150 $ = 0.3 %. Sizes the number of MNQ.")
 iMaxQty   = input.int(30, "Max contracts", minval = 1, group = grpR)
@@ -147,8 +150,8 @@ if signalBar and flat and tradedDay != dayKey and not na(atrD)
         stopPx  = math.round_to_mintick(close - s * riskPts)
         tgtPx   = math.round_to_mintick(close + s * iRR * riskPts)
         perCt   = riskPts * syminfo.pointvalue + 2 * 0.80 + syminfo.mintick * syminfo.pointvalue
-        q = math.max(1, math.min(iMaxQty, math.floor(iRiskUsd / perCt)))
-        if iSkipBig and perCt > 1.5 * iRiskUsd
+        q = iSizeMode == "Fixed contracts" ? iQty : math.max(1, math.min(iMaxQty, math.floor(iRiskUsd / perCt)))
+        if iSizeMode == "Risk $ per trade" and iSkipBig and perCt > 1.5 * iRiskUsd
             status := "no trade: 1 contract > 1.5 x risk"
         else
             strategy.entry("OD", s > 0 ? strategy.long : strategy.short, qty = q, comment = s > 0 ? "OD long" : "OD short",

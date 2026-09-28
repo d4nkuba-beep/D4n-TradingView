@@ -69,6 +69,8 @@ iMaxRisk = input.float(150.0, "Max stop (points) - skip if larger", group = grpR
 iRiskAtr = input.float(5.0, "Sweep: max stop in ATR(14) (0 = use points)", minval = 0, step = 0.5, group = grpR)
 iTp1R    = input.float(1.0, "TP1 (R)", step = 0.25, group = grpR)
 iTp2R    = input.float(2.0, "TP2 (R)", step = 0.25, group = grpR)
+iQty     = input.int(2, "Contracts (MNQ) per trade", minval = 1, group = grpR,
+     tooltip = "Every trade opens exactly this many MNQ. TP1 closes TP1 size % of them (rounded down), the rest runs to TP2.")
 iTp1Pct  = input.int(50, "TP1 size (%)", minval = 1, maxval = 99, group = grpR)
 iBe      = input.bool(true, "Move stop to breakeven after TP1", group = grpR)
 
@@ -92,7 +94,7 @@ tpTicker = iTpTicker == "" ? syminfo.ticker : iTpTicker
 jNum(float x) => str.tostring(x, format.mintick)
 tpHead(string action) => '{"ticker":"' + tpTicker + '","action":"' + action + '"'
 tpEntry(int s, bool isLimit, float lim, float sl, string tag) =>
-    int q = int(strategy.default_entry_qty(close))
+    int q = iQty
     iTpOn ? tpHead(s > 0 ? "buy" : "sell") + ',"orderType":"' + (isLimit ? 'limit","limitPrice":' + jNum(lim) : 'market"') +
          ',"quantity":' + str.tostring(q) + ',"price":' + jNum(isLimit ? lim : close) +
          (iTpBrokerSl ? ',"stopLoss":{"type":"stop","stopPrice":' + jNum(sl) + '}' : "") +
@@ -100,7 +102,7 @@ tpEntry(int s, bool isLimit, float lim, float sl, string tag) =>
 // "price" goes into every message: with Tradovate (e.g. Apex) TradersPost cannot fetch quotes
 tpExitAll(float px) => iTpOn ? tpHead("exit") + ',"price":' + jNum(px) + ',"cancel":true}' : ""
 tpExitQty(float px) =>
-    int q1 = int(math.floor(strategy.default_entry_qty(close) * iTp1Pct / 100))
+    int q1 = int(math.floor(iQty * iTp1Pct / 100))
     iTpOn ? tpHead("exit") + ',"quantity":' + str.tostring(q1) + ',"price":' + jNum(px) + '}' : ""
 tpBreakeven() => tpHead("breakeven") + ',"orderType":"stop","price":' + jNum(close) + '}'
 tpCancel() => tpHead("cancel") + ',"price":' + jNum(close) + '}'
@@ -460,9 +462,9 @@ else
                     tTp1 := entry + s * iTp1R * risk
                     tTp2 := entry + s * iTp2R * risk
                     if iEntryMode == "Market"
-                        strategy.entry("Sweep", s > 0 ? strategy.long : strategy.short, comment = armName, alert_message = tpEntry(s, false, entry, sl, armName))
+                        strategy.entry("Sweep", s > 0 ? strategy.long : strategy.short, qty = iQty, comment = armName, alert_message = tpEntry(s, false, entry, sl, armName))
                     else
-                        strategy.entry("Sweep", s > 0 ? strategy.long : strategy.short, limit = entry, comment = armName, alert_message = tpEntry(s, true, entry, sl, armName))
+                        strategy.entry("Sweep", s > 0 ? strategy.long : strategy.short, qty = iQty, limit = entry, comment = armName, alert_message = tpEntry(s, true, entry, sl, armName))
                         pendBar := bar_index
                     npAtEntry := strategy.netprofit
                     enteredNow := true
@@ -501,7 +503,7 @@ else if iUseOrb and not orbDone and not na(orHi) and todMin >= orEnd and tod <= 
                 slOrig := slO
                 tTp1 := close + so * iTp1R * riskO
                 tTp2 := close + so * iTp2R * riskO
-                strategy.entry("Sweep", so > 0 ? strategy.long : strategy.short, comment = "ORB", alert_message = tpEntry(so, false, close, slO, "ORB"))
+                strategy.entry("Sweep", so > 0 ? strategy.long : strategy.short, qty = iQty, comment = "ORB", alert_message = tpEntry(so, false, close, slO, "ORB"))
                 dbgOrders += 1
                 npAtEntry := strategy.netprofit
                 placeExits()
