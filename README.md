@@ -120,7 +120,7 @@ python g_orb.py; python g_sweep.py; python g_bos.py; python g_more.py; python g_
 
 ## TradersPost-Webhook im Opening Drive (`strategies/mnq_m5_opening_drive.pine`)
 
-Einstieg: `{"ticker":"MNQZ2026","action":"buy","orderType":"market","quantity":1,"price":30252.25,"stopLoss":{"type":"stop","stopPrice":30210.5},"takeProfit":{"limitPrice":30670}}`
+Jede Nachricht enthält `"price"` (TradersPost kann bei Tradovate/Apex keine Kurse abrufen und braucht ihn). Einstieg: `{"ticker":"MNQZ2026","action":"buy","orderType":"market","quantity":1,"price":30252.25,"stopLoss":{"type":"stop","stopPrice":30210.5},"takeProfit":{"limitPrice":30670}}`
 (Stop und Ziel als Bracket beim Broker). Nach +2 R: `{"action":"breakeven","orderType":"stop"}`. SL, TP, BE und 15:55: `{"action":"exit","cancel":true}`.
 Alarm wie unten: „Order fills and alert() function calls“, Nachricht `{{strategy.order.alert_message}}`.
 

@@ -97,12 +97,13 @@ tpEntry(int s, bool isLimit, float lim, float sl, string tag) =>
          ',"quantity":' + str.tostring(q) + ',"price":' + jNum(isLimit ? lim : close) +
          (iTpBrokerSl ? ',"stopLoss":{"type":"stop","stopPrice":' + jNum(sl) + '}' : "") +
          ',"extras":{"setup":"' + tag + '"}}' : ""
-tpExitAll() => iTpOn ? tpHead("exit") + ',"cancel":true}' : ""
-tpExitQty() =>
+// "price" goes into every message: with Tradovate (e.g. Apex) TradersPost cannot fetch quotes
+tpExitAll(float px) => iTpOn ? tpHead("exit") + ',"price":' + jNum(px) + ',"cancel":true}' : ""
+tpExitQty(float px) =>
     int q1 = int(math.floor(strategy.default_entry_qty(close) * iTp1Pct / 100))
-    iTpOn ? tpHead("exit") + ',"quantity":' + str.tostring(q1) + '}' : ""
-tpBreakeven() => tpHead("breakeven") + ',"orderType":"stop"}'
-tpCancel() => tpHead("cancel") + '}'
+    iTpOn ? tpHead("exit") + ',"quantity":' + str.tostring(q1) + ',"price":' + jNum(px) + '}' : ""
+tpBreakeven() => tpHead("breakeven") + ',"orderType":"stop","price":' + jNum(close) + '}'
+tpCancel() => tpHead("cancel") + ',"price":' + jNum(close) + '}'
 
 // ───────── Filters (all known at bar close) ─────────
 ema20  = ta.ema(close, 20)
@@ -314,9 +315,9 @@ inWindow = tod >= iStart and tod <= iLastEntry and tradesToday < iMaxTrades and 
 
 placeExits() =>
     strategy.exit("TP1", "Sweep", qty_percent = iTp1Pct, limit = tTp1, stop = tStop, comment_profit = "TP1", comment_loss = "SL",
-         alert_profit = tpExitQty(), alert_loss = tpExitAll())
+         alert_profit = tpExitQty(tTp1), alert_loss = tpExitAll(tStop))
     strategy.exit("TP2", "Sweep", limit = tTp2, stop = tStop, comment_profit = "TP2", comment_loss = "SL",
-         alert_profit = tpExitAll(), alert_loss = tpExitAll())
+         alert_profit = tpExitAll(tTp2), alert_loss = tpExitAll(tStop))
 
 // structure before the sweep (computed every bar so the ta.* history stays consistent)
 lowestN  = ta.lowest(low, math.max(iStructLb, 1))
@@ -327,7 +328,7 @@ structHi = iStructLb > 0 ? highestN[1] : high
 // flat at session end
 if tod >= iFlat and (not flat or pending)
     if not flat
-        strategy.close_all(comment = "Time", alert_message = tpExitAll())
+        strategy.close_all(comment = "Time", alert_message = tpExitAll(close))
     if pending
         strategy.cancel("Sweep")
         if iTpOn
@@ -356,7 +357,7 @@ if not flat and not tp1Done and math.abs(strategy.position_size) < math.abs(stra
     if iBe
         tStop := strategy.position_avg_price
         strategy.exit("TP2", "Sweep", limit = tTp2, stop = tStop, comment_profit = "TP2", comment_loss = "BE",
-             alert_profit = tpExitAll(), alert_loss = tpExitAll())
+             alert_profit = tpExitAll(tTp2), alert_loss = tpExitAll(tStop))
         if iTpOn
             alert(tpBreakeven(), alert.freq_once_per_bar_close)
 

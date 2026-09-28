@@ -71,8 +71,9 @@ tpEntry(int s, int q, float sl, float tp) =>
     iTpOn ? tpHead(s > 0 ? "buy" : "sell") + ',"orderType":"market","quantity":' + str.tostring(q) + ',"price":' + jNum(close) +
          (iTpBracket ? ',"stopLoss":{"type":"stop","stopPrice":' + jNum(sl) + '},"takeProfit":{"limitPrice":' + jNum(tp) + '}' : "") +
          ',"extras":{"setup":"Opening Drive"}}' : ""
-tpExitAll() => iTpOn ? tpHead("exit") + ',"cancel":true}' : ""
-tpBreakeven() => tpHead("breakeven") + ',"orderType":"stop"}'
+// "price" goes into every message: with Tradovate (e.g. Apex) TradersPost cannot fetch quotes
+tpExitAll(float px) => iTpOn ? tpHead("exit") + ',"price":' + jNum(px) + ',"cancel":true}' : ""
+tpBreakeven() => tpHead("breakeven") + ',"orderType":"stop","price":' + jNum(close) + '}'
 
 // ───────── Indicators ─────────
 ema9   = ta.ema(close, 9)
@@ -153,7 +154,7 @@ if signalBar and flat and tradedDay != dayKey and not na(atrD)
             strategy.entry("OD", s > 0 ? strategy.long : strategy.short, qty = q, comment = s > 0 ? "OD long" : "OD short",
                  alert_message = tpEntry(s, q, stopPx, tgtPx))
             strategy.exit("OD x", "OD", stop = stopPx, limit = tgtPx, comment_loss = "SL", comment_profit = "TP",
-                 alert_profit = tpExitAll(), alert_loss = tpExitAll())
+                 alert_profit = tpExitAll(tgtPx), alert_loss = tpExitAll(stopPx))
             sigStop := stopPx
             sigTgt  := tgtPx
             sigSide := s
@@ -175,14 +176,14 @@ if strategy.position_size != 0 and iBeAt > 0 and not beDone
     fav  = strategy.position_size > 0 ? high - ep : ep - low
     if fav >= iBeAt * risk
         strategy.exit("OD x", "OD", stop = ep, limit = sigTgt, comment_loss = "BE", comment_profit = "TP",
-             alert_profit = tpExitAll(), alert_loss = tpExitAll())
+             alert_profit = tpExitAll(sigTgt), alert_loss = tpExitAll(ep))
         beDone := true
         if iTpOn
             alert(tpBreakeven(), alert.freq_once_per_bar_close)
 
 // time exit (also closes anything that would otherwise run into the next session)
 if strategy.position_size != 0 and (mClose >= flatMin or mOpen < 570)
-    strategy.close_all(comment = "Time", alert_message = tpExitAll())
+    strategy.close_all(comment = "Time", alert_message = tpExitAll(close))
 
 // ───────── Display ─────────
 plot(iShowEma ? ema20 : na, "EMA20", color.new(color.teal, 0))
