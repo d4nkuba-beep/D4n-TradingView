@@ -12,7 +12,10 @@ als TradingView-Strategie plus lokaler Python-Backtest.
 | `backtest/plot_trades.py`, `backtest/charts/` | Chart-Vorschau aller Trade-Tage mit Levels, Zonen und Trade-Boxen |
 | `backtest/data/mnq_{5m,15m,1h}.csv` | MNQ-Kerzen (Yahoo `MNQ=F`, stichprobenartig gegen TradingView `CME_MINI:MNQ1!` geprüft: identisch) |
 
-## Die Regeln
+> **Aktuelle, vollständige Regeln und Einstellungen: [`STRATEGY.md`](STRATEGY.md).**
+> Diese README ist die Entwicklungs-Chronik (Version 1 → 3); der folgende Abschnitt zeigt die ursprünglichen Regeln von Version 1.
+
+## Die Regeln (Version 1)
 
 Aus den Bildern abgeleitet: Liquidität über/unter einem Hoch/Tief wird zur NY-Eröffnung abgeholt,
 der Preis dreht, Ziel ist die Gegenseite, Stop über/unter dem Docht, danach „BE ziehen“.
