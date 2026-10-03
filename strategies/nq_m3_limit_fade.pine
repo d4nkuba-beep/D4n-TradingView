@@ -1,0 +1,210 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+// NQ M3 choppy-market limit fade (same rules as backtest/m3_limit_fade.py)
+//  1. NQ 3-minute candles, signals 09:00-11:00 CT, long only, one order or position at a time.
+//  2. Choppy filter: efficiency ratio of the last 15 closes <= 0.35.
+//  3. At the candle close rest a buy limit at close - 1.0 x ATR(14).
+//  4. Fill only if price trades 1 tick through the limit ("Verify price for limit orders" = 1 tick,
+//     set below via backtest_fill_limits_assumption). Cancel after 9 min.
+//  5. Target: middle of the signal candle. Stop: 1.5 x ATR below the limit.
+//  6. Time stop 15 min after the fill (market), flat at 11:00 CT.
+//  7. 1 tick slippage on stop and market exits. By default the target is only placed after the
+//     fill bar has closed (the Python test assumes the losing move comes first inside a bar).
+strategy("NQ M3 Limit Fade", shorttitle = "NQ M3 Fade", overlay = true,
+     initial_capital = 50000, default_qty_type = strategy.fixed, default_qty_value = 1,
+     margin_long = 0, margin_short = 0,   // no margin check (v6 default of 100 % rejects futures orders)
+     commission_type = strategy.commission.cash_per_contract, commission_value = 2.25,
+     slippage = 1, backtest_fill_limits_assumption = 1,
+     process_orders_on_close = false, calc_on_every_tick = false,
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ───────── Inputs ─────────
+const string TZ = "America/Chicago"
+grpS = "Session (Chicago time)"
+iStart     = input.int(900,  "Signals from (hhmm, candle close after)", group = grpS)
+iEnd       = input.int(1100, "Signals until / flat at (hhmm)",          group = grpS)
+iMaxTrades = input.int(99,   "Max trades per day", minval = 1,          group = grpS)
+
+grpF = "Choppy filter"
+iErLen = input.int(15, "Efficiency ratio: closes", minval = 3, group = grpF)
+iErMax = input.float(0.35, "Max efficiency ratio (1 = off)", minval = 0.01, maxval = 1.0, step = 0.05, group = grpF)
+iTrend = input.string("None", "Trend filter", options = ["None", "EMA 20/50"], group = grpF)
+iMinAtr = input.float(0.0, "Min ATR (points, 0 = off)", minval = 0, group = grpF)
+
+grpE = "Entry & exits"
+iSide     = input.string("Long", "Direction", options = ["Long", "Short", "Both"], group = grpE,
+     tooltip = "Both: long if the candle closed in its lower half, short if in its upper half")
+iAtrLen   = input.int(14, "ATR length", minval = 1, group = grpE)
+iEntryAtr = input.float(1.0, "Limit distance (x ATR)", minval = 0.0, step = 0.25, group = grpE)
+iStopAtr  = input.float(1.5, "Stop below limit (x ATR)", minval = 0.25, step = 0.25, group = grpE)
+iTarget   = input.float(0.5, "Target in signal candle (0 = low, 0.5 = middle, 1 = high)", minval = 0, maxval = 1, step = 0.25, group = grpE)
+iCancel   = input.int(9,  "Cancel limit after (min)", minval = 1, group = grpE)
+iTimeStop = input.int(15, "Time stop after fill (min, 0 = off)", minval = 0, group = grpE)
+iFillTgt  = input.bool(false, "Target may fill on the fill bar", group = grpE)
+
+grpV = "Display"
+iShowBoxes = input.bool(true, "Trade boxes (red = risk, green = target)", group = grpV)
+iShowLimit = input.bool(true, "Resting limit orders", group = grpV)
+iShowEr    = input.bool(true, "Mark choppy candles in the window", group = grpV)
+iShowDbg   = input.bool(true, "Show debug table", group = grpV)
+
+// ───────── Helpers ─────────
+hhmm(t) => hour(t, TZ) * 100 + minute(t, TZ)
+tick = syminfo.mintick
+floorTick(x) => math.floor(x / tick + 1e-9) * tick
+ceilTick(x)  => math.ceil(x / tick - 1e-9) * tick
+barSec = timeframe.in_seconds()
+cancelBars = math.max(1, int(math.ceil(iCancel * 60 / barSec)))
+
+// ───────── Indicators (known at the candle close) ─────────
+er    = math.abs(close - close[iErLen - 1]) / math.sum(math.abs(ta.change(close)), iErLen - 1)
+atr   = ta.atr(iAtrLen)
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+
+todClose = hhmm(time_close)
+inWindow = todClose > iStart and todClose < iEnd
+atEnd    = todClose >= iEnd and hhmm(time) < iEnd
+
+// ───────── State ─────────
+var int   tradesToday = 0
+var int   pendBar = na
+var int   side = 0
+var float oLim = na
+var float oStop = na
+var float oTgt = na
+var float npAtEntry = na
+var bool  tgtPlaced = false
+var line  limLine = na
+var box   tbRisk = na
+var box   tbRew = na
+var int   nSignals = 0
+var int   nOrders = 0
+var int   nCancels = 0
+
+if hhmm(time) >= 800 and hhmm(time[1]) < 800
+    tradesToday := 0
+
+flat    = strategy.position_size == 0
+pending = not na(pendBar)
+justOpened = not flat and strategy.position_size[1] == 0
+justClosed = strategy.closedtrades > strategy.closedtrades[1]
+
+if justOpened or (justClosed and flat and strategy.position_size[1] == 0)
+    tradesToday += 1   // counted on the fill (also when filled and stopped within one bar)
+
+// ───────── Trade boxes (like the long/short position tool) ─────────
+drawTrade(int eb, float ep) =>
+    b1 = box.new(eb, math.max(ep, oStop), bar_index, math.min(ep, oStop),
+         border_color = color.new(color.red, 50), bgcolor = color.new(color.red, 82))
+    b2 = box.new(eb, math.max(ep, oTgt), bar_index, math.min(ep, oTgt),
+         border_color = color.new(color.green, 50), bgcolor = color.new(color.green, 82))
+    [b1, b2]
+
+if iShowBoxes
+    if justOpened
+        [b1, b2] = drawTrade(strategy.opentrades.entry_bar_index(0), strategy.opentrades.entry_price(0))
+        tbRisk := b1
+        tbRew := b2
+    if justClosed and flat and na(tbRisk)    // filled and closed within the same bar
+        n = strategy.closedtrades - 1
+        [b1, b2] = drawTrade(strategy.closedtrades.entry_bar_index(n), strategy.closedtrades.entry_price(n))
+        tbRisk := b1
+        tbRew := b2
+    if not na(tbRisk)
+        box.set_right(tbRisk, bar_index)
+        box.set_right(tbRew, bar_index)
+    if justClosed and flat and not na(tbRisk)
+        pnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
+        label.new(bar_index, pnl >= 0 ? high : low, (pnl >= 0 ? "+" : "") + str.tostring(pnl, "#") + " $",
+             yloc = pnl >= 0 ? yloc.abovebar : yloc.belowbar, color = color(na), size = size.small,
+             textcolor = pnl >= 0 ? color.green : color.red,
+             style = pnl >= 0 ? label.style_label_down : label.style_label_up)
+        tbRisk := na
+        tbRew := na
+
+// ───────── Order management ─────────
+// the fill closes the pending state; place the target once the fill bar is done
+if justOpened or (justClosed and flat)
+    pendBar := na
+    if not na(limLine)
+        line.set_x2(limLine, bar_index)
+        limLine := na
+if not flat and not tgtPlaced
+    strategy.exit("X", "Fade", limit = oTgt, stop = oStop, comment_profit = "TP", comment_loss = "SL")
+    tgtPlaced := true
+
+// cancel an unfilled limit after iCancel minutes or at the end of the window
+if flat and not na(pendBar) and not justClosed and (bar_index - pendBar >= cancelBars or atEnd)
+    strategy.cancel("Fade")
+    strategy.cancel("X")
+    pendBar := na
+    nCancels += 1
+    if not na(limLine)
+        line.set_x2(limLine, bar_index)
+        line.set_style(limLine, line.style_dotted)
+        limLine := na
+
+// time stop and session end (market, fills on the next bar open)
+if not flat
+    if iTimeStop > 0 and time_close >= strategy.opentrades.entry_time(0) + iTimeStop * 60000
+        strategy.close("Fade", comment = "Time")
+    if atEnd
+        strategy.close("Fade", comment = "Flat")
+
+// ───────── Signal at the candle close ─────────
+choppy = er <= iErMax and atr >= iMinAtr
+isSignal = false
+if flat and na(pendBar) and not justClosed and inWindow and choppy and tradesToday < iMaxTrades
+    int s = iSide == "Long" ? 1 : iSide == "Short" ? -1 : (close <= (high + low) / 2 ? 1 : -1)
+    if iTrend == "EMA 20/50" and (ema20 - ema50) * s <= 0
+        s := 0
+    if s != 0
+        float lim = s > 0 ? floorTick(close - iEntryAtr * atr) : ceilTick(close + iEntryAtr * atr)
+        float tgt = math.round_to_mintick(low + (high - low) * (s > 0 ? iTarget : 1 - iTarget))
+        float sl  = s > 0 ? floorTick(lim - iStopAtr * atr) : ceilTick(lim + iStopAtr * atr)
+        if (tgt - lim) * s > tick
+            isSignal := true
+            nSignals += 1
+            side := s
+            oLim := lim
+            oStop := sl
+            oTgt := tgt
+            strategy.entry("Fade", s > 0 ? strategy.long : strategy.short, limit = lim, comment = s > 0 ? "Fade L" : "Fade S")
+            // until the fill bar has closed only the stop protects the position (losing move first)
+            if iFillTgt
+                strategy.exit("X", "Fade", limit = tgt, stop = sl, comment_profit = "TP", comment_loss = "SL")
+            else
+                strategy.exit("X", "Fade", stop = sl, comment_loss = "SL")
+            tgtPlaced := iFillTgt
+            pendBar := bar_index
+            nOrders += 1
+            if iShowLimit
+                limLine := line.new(bar_index, lim, bar_index + cancelBars, lim, color = color.new(color.blue, 20), width = 2)
+            alert("NQ M3 fade " + (s > 0 ? "BUY" : "SELL") + " limit " + str.tostring(lim) + " SL " + str.tostring(sl) +
+                 " TP " + str.tostring(tgt), alert.freq_once_per_bar_close)
+
+// ───────── Visuals ─────────
+showTrade = not flat or not na(pendBar)
+plot(showTrade ? oStop : na, "Stop",   color.red,   2, plot.style_linebr)
+plot(showTrade ? oTgt  : na, "Target", color.green, 2, plot.style_linebr)
+plot(showTrade ? oLim  : na, "Limit",  color.blue,  1, plot.style_linebr)
+plot(iTrend == "EMA 20/50" ? ema20 : na, "EMA 20", color.new(color.orange, 20))
+plot(iTrend == "EMA 20/50" ? ema50 : na, "EMA 50", color.new(color.purple, 20))
+plotshape(isSignal, "Signal candle", shape.triangleup, location.belowbar, color.new(color.blue, 0), size = size.tiny)
+bgcolor(inWindow ? (iShowEr and choppy ? color.new(color.orange, 88) : color.new(color.blue, 94)) : na, title = "Window / choppy")
+
+var table dbg = table.new(position.top_right, 2, 6, bgcolor = color.new(color.gray, 85), border_width = 1)
+if iShowDbg and barstate.islast
+    table.cell(dbg, 0, 0, "Efficiency ratio", text_size = size.small)
+    table.cell(dbg, 1, 0, str.tostring(er, "#.##"), text_size = size.small)
+    table.cell(dbg, 0, 1, "Limit orders", text_size = size.small)
+    table.cell(dbg, 1, 1, str.tostring(nOrders), text_size = size.small)
+    table.cell(dbg, 0, 2, "Cancelled", text_size = size.small)
+    table.cell(dbg, 1, 2, str.tostring(nCancels), text_size = size.small)
+    table.cell(dbg, 0, 3, "Trades filled", text_size = size.small)
+    table.cell(dbg, 1, 3, str.tostring(strategy.closedtrades + strategy.opentrades), text_size = size.small)
+    table.cell(dbg, 0, 4, "Chart TF / tick", text_size = size.small)
+    table.cell(dbg, 1, 4, timeframe.period + " / " + str.tostring(syminfo.mintick), text_size = size.small)
+    table.cell(dbg, 0, 5, "ATR", text_size = size.small)
+    table.cell(dbg, 1, 5, str.tostring(atr, "#.##"), text_size = size.small)

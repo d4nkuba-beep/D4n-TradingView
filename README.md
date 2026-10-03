@@ -10,6 +10,8 @@ als TradingView-Strategie plus lokaler Python-Backtest.
 | `backtest/orb_backtest.py` | Opening-Range-Breakout-Modul |
 | `backtest/combined_backtest.py` | Beide Setups zusammen, so wie das Pine-Script handelt |
 | `backtest/plot_trades.py`, `backtest/charts/` | Chart-Vorschau aller Trade-Tage mit Levels, Zonen und Trade-Boxen |
+| `strategies/nq_m3_limit_fade.pine`, `backtest/m3_limit_fade.py` | NQ M3 Limit-Fade im Seitwärtsmarkt (siehe unten) |
+| `backtest/data/nq_{3m,1m}.csv` | NQ-Kerzen aus der TradingView-MCP (`CME_MINI:NQ1!`, Chicago-Zeit) |
 | `backtest/data/mnq_{5m,15m,1h}.csv` | MNQ-Kerzen (Yahoo `MNQ=F`, stichprobenartig gegen TradingView `CME_MINI:MNQ1!` geprüft: identisch) |
 
 > **Aktuelle, vollständige Regeln und Einstellungen: [`STRATEGY.md`](STRATEGY.md).**
@@ -119,6 +121,87 @@ Netto je Viertel des Zeitraums: +1.260 / +1.482 / −484 / +849 $. Bootstrap P(�
   ausgewählt. Das Ergebnis ist deshalb vermutlich zu optimistisch (Auswahleffekt). Der späte Testteil ist nur leicht positiv.
 - Der entscheidende nächste Schritt ist der **TradingView Strategy Tester mit Deep Backtesting über mehrere Jahre**
   (M5-Historie von MNQ1!), danach Demokonto. Erst wenn es dort über 200+ Trades hält, ist es eine Strategie.
+
+## NQ M3 Limit-Fade (Seitwärtsmarkt, Long)
+
+Vorgegebene Regeln, 1:1 umgesetzt in `strategies/nq_m3_limit_fade.pine` und `backtest/m3_limit_fade.py`:
+
+1. NQ-3-Minuten-Kerzen, 09:00–11:00 CT, nur Long, immer nur eine Order oder Position.
+2. Seitwärtsfilter: Efficiency Ratio der letzten 15 Schlusskurse ≤ 0,35
+   (`|close − close[14]| / Σ|close − close[1]|` über 14 Schritte).
+3. Nach Kerzenschluss Buy-Limit bei `close − 1,0 × ATR(14)`.
+4. Fill nur, wenn der Preis 1 Tick durch das Limit handelt, Storno nach 9 Minuten.
+5. Ziel: Mitte der Signalkerze. Stop: 1,5 × ATR unter dem Limit.
+6. Zeitstopp 15 Minuten nach dem Fill, glatt um 11:00 CT.
+7. 1 Tick Slippage auf Stops und Market-Ausstiege. In jeder Kerze kommt die Verlustbewegung zuerst
+   (Stop vor Ziel). Auf der Fill-Kerze selbst wird kein Ziel gefüllt. Auch das Ziel-Limit braucht 1 Tick Durchhandel.
+
+Kosten: 1 NQ (20 $/Punkt), 2,25 $ Kommission pro Seite.
+
+**Daten.** Die TradingView-MCP liefert höchstens 5.000 Kerzen pro Abruf und hat keine Sekunden-Daten.
+Das ergibt M3 vom 11.09. bis 25.09.2026 (11 Handelstage) und M1 vom 22.09. bis 25.09. (4 Tage).
+Deshalb gilt „1 Sekunde nach Schluss“ als Order-Start zu Beginn der nächsten Kerze.
+„Verlust zuerst“ wird je M3-Kerze gerechnet bzw. mit `--res 1m` je Minute (strenger als je Sekunde).
+
+**Ergebnis mit den vorgegebenen Regeln**
+
+| Satz | Trades | Treffer | PF | Ø R | Netto | Max. DD |
+|---|---|---|---|---|---|---|
+| 11.–18.09. | 11 | 45,5 % | 0,55 | −0,09 | −1.254 $ | 1.804 $ |
+| 21.–25.09. | 12 | 58,3 % | 1,20 | +0,08 | +646 $ | 2.204 $ |
+| Gesamt (M3) | 23 | 52,2 % | 0,90 | −0,00 | −608 $ | 2.204 $ |
+| Gegenprobe M1-Fills, 22.–25.09. | 12 | 58,3 % | 0,64 | −0,09 | −1.344 $ | 2.272 $ |
+
+Ausstiege: 9 × Ziel, 4 × Stop, 10 × Zeitstopp. Der Zeitstopp beendet fast die Hälfte der Trades.
+
+**Einzelne Parameter verändert** (`--sens`, alle anderen Regeln wie vorgegeben, Netto in $, 11 Tage):
+
+| Parameter | Werte → Netto |
+|---|---|
+| ER-Grenze | 0,20: −1.870 · 0,25: −224 · 0,30: −1.480 · **0,35: −608** · 0,40: +314 · 0,50: −1.004 · aus: −2.238 |
+| ER-Länge | 10: +563 · 12: −2.082 · **15: −608** · 20: +574 · 30: −3.512 |
+| Limit-Abstand (× ATR) | 0,5: +422 · 0,75: +6.017 · **1,0: −608** · 1,25: +2.824 · 1,5: +1.281 · 2,0: −762 |
+| Stop (× ATR) | 0,75: +963 · 1,0: +2.397 · **1,5: −608** · 2,0: +1.412 · 3,0: +7 |
+| Ziel in der Kerze | 0,25: −454 · **0,5: −608** · 0,75: −2.454 · Hoch: −1.629 |
+| Storno (min) | 3: −4.539 · 6: +554 · **9: −608** · 15: −1.719 · 30: −520 |
+| Zeitstopp (min) | 6: +355 · 9: +574 · **15: −608** · 30: −553 · aus: −1.569 |
+| Ziel auch auf der Fill-Kerze | **nein: −608** · ja: **+6.308** |
+| Richtung | **Long: −608** · Short: +2.648 · beide: −1.468 |
+| Signale ab | 08:30: +718 · **09:00: −608** · 09:30: +4.060 |
+| EMA-20/50-Trendfilter | **aus: −608** · an: −649 |
+
+**Grid** (`--grid`, 8.640 Kombinationen aus ER-Grenze, ER-Länge, Limit-Abstand, Stop, Ziel, Storno, Zeitstopp):
+63 % der Kombinationen sind positiv, aber nur 27 % in beiden Hälften. Der Median der zweiten Hälfte ist bei fast
+jedem Parameterwert negativ. Einzige Ausnahme ist ein Limit-Abstand von 0,75 × ATR (Median +2.127 $, zweite Hälfte +422 $).
+Die vorgegebenen Regeln landen auf Platz 6.349 von 8.640. Die besten Kombinationen liegen bei rund +9.000 $
+(z. B. 0,75 × ATR Limit, 1,0 × ATR Stop, Ziel bei 75 % der Kerze). Mit M1-Fills bleiben davon auf 4 Tagen +3.924 $.
+
+**Einordnung**
+
+- Mit den vorgegebenen Regeln zeigt sich kein Vorteil: ca. 0 R pro Trade, auf M1 negativ.
+- Das Ergebnis hängt fast vollständig an der Annahme innerhalb der Kerze. Darf das Ziel schon auf der Fill-Kerze
+  füllen, wird aus −608 $ ein Gewinn von +6.308 $. Diese Strategie lässt sich nur mit Tick- oder Sekundendaten ehrlich bewerten.
+- Nachbarwerte springen stark (Limit 0,75 → +6.017 $, 1,0 → −608 $). Das ist Rauschen bei 11 Tagen und ca. 25 Trades,
+  kein stabiles Optimum. Die Grid-Sieger sind auf diesem kurzen Zeitraum überangepasst.
+- Nächster Schritt: das Pine-Script im TradingView Strategy Tester mit Deep Backtesting über mehrere Jahre laufen lassen.
+  Bar Magnifier einschalten, falls verfügbar. Erst danach Parameter bewerten.
+
+```
+python backtest/m3_limit_fade.py --trades          # vorgegebene Regeln + Trade-Liste
+python backtest/m3_limit_fade.py --res 1m          # Fills auf M1 (nur die letzten 4 Tage)
+python backtest/m3_limit_fade.py --sens            # einzelne Parameter
+python backtest/m3_limit_fade.py --grid            # 8.640 Kombinationen (~25 s)
+python backtest/m3_limit_fade.py --entry-atr 0.75 --plot   # Chart je Trade-Tag -> backtest/charts/nq_m3_*.png
+```
+
+**Pine-Script** (`CME_MINI:NQ1!`, 3 Minuten): Alle Regeln sind als Eingaben einstellbar: ER-Länge/-Grenze, ATR-Länge,
+Limit-Abstand, Stop, Ziel in der Kerze, Storno, Zeitstopp, Fenster, Richtung (Long/Short/beide), EMA-Trendfilter,
+Min-ATR, Max. Trades pro Tag, Ziel auf der Fill-Kerze. Der 1-Tick-Durchhandel ist im Script voreingestellt
+(`backtest_fill_limits_assumption = 1`, unter Eigenschaften „Preis für Limit-Orders prüfen“).
+Trade-Boxen wie beim Sweep-Script: Rot = Risiko, Grün = Ziel, Ergebnis in $ am Ausstieg.
+Zusätzlich zeigt eine blaue Linie das ruhende Limit (gepunktet = storniert), ein Dreieck markiert die Signalkerze,
+orangefarbener Hintergrund die Seitwärtskerzen im Fenster. Das Script ist nicht lokal kompiliert.
+Falls TradingView einen Fehler meldet, bitte die Meldung schicken.
 
 ## Version 1: Ergebnisse ohne Filter
 
